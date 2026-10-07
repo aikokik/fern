@@ -1,0 +1,63 @@
+"""Inspect eval of the real brain. The agent bridge routes the brain's model calls through Inspect,
+so the model is chosen on the CLI and every call is logged:
+
+    uv run inspect eval evals/household.py --model openai/gpt-5-mini
+    uv run inspect view
+"""
+
+import tempfile
+from dataclasses import replace
+from pathlib import Path
+
+import httpx
+from inspect_ai import Task, task
+from inspect_ai.agent import Agent, AgentState, agent, agent_bridge
+from inspect_ai.dataset import json_dataset
+from inspect_ai.scorer import Score, Target, accuracy, model_graded_qa, scorer
+from inspect_ai.solver import TaskState
+from inspect_ai.util import store
+
+from fern.brain import Brain
+from fern.config import settings
+from fern.fakes import world
+
+
+@agent
+def household_brain() -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        s = replace(
+            settings, data_dir=Path(tempfile.mkdtemp()), models={"main": "inspect", "fast": "inspect"},
+            home_url="http://ha.local:8123", home_token="eval", tracing=False,
+        )
+        async with agent_bridge(state) as bridge, Brain(s) as brain:
+            brain.http._transport = httpx.MockTransport(world)
+            out = await brain.run(state.messages[-1].text, device="phone", session="eval")
+            store().set("out", out)
+        return bridge.state
+
+    return execute
+
+
+@scorer(metrics=[accuracy()])
+def behavior():
+    """Expected tools called, forbidden tools not called, approval gate respected."""
+
+    async def score(state: TaskState, target: Target) -> Score:
+        out, m = store().get("out", {}), state.metadata
+        called = set(out.get("tools", []))
+        problems = [f"missing {t}" for t in m.get("tools", []) if t not in called]
+        problems += [f"forbidden {t}" for t in m.get("forbid", []) if t in called]
+        if m.get("pending") is not None and bool(out.get("pending")) != m["pending"]:
+            problems.append(f"pending={bool(out.get('pending'))}")
+        return Score(value=not problems, explanation="; ".join(problems) or "ok")
+
+    return score
+
+
+@task
+def household() -> Task:
+    return Task(
+        dataset=json_dataset(str(Path(__file__).parent / "household.jsonl")),
+        solver=household_brain(),
+        scorer=[behavior(), model_graded_qa()],
+    )

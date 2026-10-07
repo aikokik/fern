@@ -1,0 +1,33 @@
+[project]
+name = "fern"
+version = "0.1.0"
+description = "Household AI brain"
+readme = "README.md"
+authors = [
+    { name = "aikokik", email = "aikokik@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.142.2",
+    "httpx>=0.28.1",
+    "openai-agents>=0.23.1",
+    "tzdata>=2026.5",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+fern = "fern.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "inspect-ai>=0.3.276",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,0 +1,63 @@
+# brain: no internet route at all (internal network). Out: only via `egress` allowlist (+ `reader` for articles).
+# In: only via `ingress`.
+#   cd deploy && cp ../.env.example .env && docker compose up -d --build
+services:
+  brain:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    env_file: .env
+    environment:
+      HTTPS_PROXY: http://egress:8888
+      HTTP_PROXY: http://egress:8888
+      NO_PROXY: reader
+      FERN_READER_URL: http://reader:8080
+    volumes: ["../data:/data"]
+    networks: [sealed]
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 128
+    restart: unless-stopped
+
+  # The only container with open egress. It accepts an HN item id, never a URL, and refuses private IPs.
+  reader:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["uvicorn", "fern.reader:app", "--host", "0.0.0.0", "--port", "8080"]
+    networks: [sealed, outside]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
+
+  egress:
+    build:
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache tinyproxy
+        USER nobody
+        CMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]
+    volumes:
+      - ./tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+      - ./allowlist:/etc/tinyproxy/allowlist:ro
+    networks: [sealed, outside]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  ingress:
+    image: alpine/socat:1.8.0.0
+    command: TCP-LISTEN:8765,fork,reuseaddr TCP:brain:8765
+    ports: ["${FERN_BIND:-127.0.0.1}:${FERN_PORT:-8765}:8765"]  # FERN_BIND=<tailscale ip> to reach it from the phone
+    networks: [sealed, outside]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+networks:
+  sealed: { internal: true }
+  outside: {}

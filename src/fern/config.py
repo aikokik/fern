@@ -1,0 +1,56 @@
+"""All settings come from env (12-factor). Secrets never enter model context."""
+
+import json
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+def _kv(raw: str) -> dict[str, str]:
+    return dict(p.split("=", 1) for p in raw.split(",") if "=" in p)
+
+
+@dataclass(frozen=True)
+class Settings:
+    data_dir: Path = Path(os.getenv("FERN_DATA", "./data"))
+    skills_dir: Path = Path(os.getenv("FERN_SKILLS", "./skills"))
+    # Virtual models: alias -> provider model string. "litellm/..." or "any-llm/..." route to other providers.
+    models: dict[str, str] = field(
+        default_factory=lambda: {"main": "gpt-5", "fast": "gpt-5-mini"} | json.loads(os.getenv("FERN_MODELS", "{}"))
+    )
+    # Codex-style approval policy: "untrusted" asks for ACT+RISKY, "on-risk" asks for RISKY, "never" disables RISKY.
+    approval: str = os.getenv("FERN_APPROVAL", "on-risk")
+    # App-level egress allowlist (the Docker proxy enforces the same list at network level).
+    allowed_hosts: frozenset[str] = frozenset(
+        os.getenv("FERN_ALLOWED_HOSTS", "api.openai.com,hacker-news.firebaseio.com").split(",")
+    )
+    device_tokens: dict[str, str] = field(default_factory=lambda: _kv(os.getenv("FERN_DEVICE_TOKENS", "")))
+    reader_url: str = os.getenv("FERN_READER_URL", "")  # set in Docker; empty = read articles in-process
+    home_url: str = os.getenv("HA_URL", "")
+    home_token: str = os.getenv("HA_TOKEN", "")
+    memory: str = os.getenv("FERN_MEMORY", "fern.memory:SQLiteMemory")  # swap in any Memory impl
+    plugins: tuple[str, ...] = tuple(p for p in os.getenv("FERN_PLUGINS", "").split(",") if p)
+    tracing: bool = os.getenv("FERN_TRACING") == "1"  # opt-in upload of traces to OpenAI's dashboard
+    max_history_turns: int = int(os.getenv("FERN_MAX_TURNS_KEPT", "8"))
+    tool_output_chars: int = int(os.getenv("FERN_TOOL_OUTPUT_CHARS", "4000"))
+    tz: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
+    # Briefing voice (OpenAI TTS). Short replies are spoken on-device by the phone instead.
+    tts_model: str = os.getenv("FERN_TTS_MODEL", "gpt-4o-mini-tts")
+    tts_voice: str = os.getenv("FERN_TTS_VOICE", "coral")
+    # Daily wake-up times (HH:MM) to pre-generate the briefing for, besides alarms set through fern.
+    briefing_at: tuple[str, ...] = tuple(t for t in os.getenv("FERN_BRIEFING_AT", "").split(",") if t)
+
+    @property
+    def db(self) -> Path:
+        return self.data_dir / "fern.db"
+
+    def model(self, alias: str) -> str:
+        return self.models.get(alias, alias)
+
+    def now(self) -> datetime:
+        return datetime.now(ZoneInfo(self.tz)) if self.tz else datetime.now().astimezone()
+
+
+settings = Settings()
