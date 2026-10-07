@@ -17,6 +17,10 @@ dependencies = [
 
 [project.scripts]
 fern = "fern.cli:main"
+fern-web = "fern_web.app:main"
+
+[tool.uv.build-backend]
+module-name = ["fern", "fern_web"]
 
 [build-system]
 requires = ["uv_build>=0.10.6,<0.11.0"]

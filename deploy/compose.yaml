@@ -1,5 +1,5 @@
 # brain: no internet route at all (internal network). Out: only via `egress` allowlist (+ `reader` for articles).
-# In: only via `ingress`.
+# In: only via `ingress` -> `web` (voice UI + pass-through to the brain API). The brain publishes no port.
 #   cd deploy && cp ../.env.example .env && docker compose up -d --build
 services:
   brain:
@@ -18,6 +18,26 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     pids_limit: 128
+    restart: unless-stopped
+
+  web:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["fern-web", "--host", "0.0.0.0", "--port", "8766"]
+    environment:  # explicit: the interface gets no device tokens, no HA token, no household data
+      OPENAI_API_KEY: ${FERN_WEB_OPENAI_KEY:-${OPENAI_API_KEY}}
+      FERN_BRAIN_URL: http://brain:8765
+      FERN_REALTIME_MODEL: ${FERN_REALTIME_MODEL:-gpt-realtime-2.1-mini}
+      FERN_REALTIME_VOICE: ${FERN_REALTIME_VOICE:-marin}
+      FERN_VOICE_DAILY_MINUTES: ${FERN_VOICE_DAILY_MINUTES:-30}
+      HTTPS_PROXY: http://egress:8888
+      NO_PROXY: brain
+    networks: [sealed]
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
     restart: unless-stopped
 
   # The only container with open egress. It accepts an HN item id, never a URL, and refuses private IPs.
@@ -50,8 +70,8 @@ services:
 
   ingress:
     image: alpine/socat:1.8.0.0
-    command: TCP-LISTEN:8765,fork,reuseaddr TCP:brain:8765
-    ports: ["${FERN_BIND:-127.0.0.1}:${FERN_PORT:-8765}:8765"]  # FERN_BIND=<tailscale ip> to reach it from the phone
+    command: TCP-LISTEN:8766,fork,reuseaddr TCP:web:8766
+    ports: ["${FERN_BIND:-127.0.0.1}:${FERN_PORT:-8766}:8766"]  # reach it via `tailscale serve`, not the LAN
     networks: [sealed, outside]
     read_only: true
     cap_drop: [ALL]

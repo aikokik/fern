@@ -17,13 +17,17 @@ log = logging.getLogger("fern")
 
 
 async def scheduler() -> None:
-    """Proactive work: pre-generate the briefing (text + audio) shortly before wake-ups."""
+    """Proactive work: pre-generate briefings before wake-ups (every minute), follow Claude Code jobs (every 5)."""
+    tick = 0
     while True:
         await asyncio.sleep(60)
-        try:
-            await brain.prepare_briefings()
-        except Exception:
-            log.exception("briefing preparation failed")
+        tick += 1
+        for every, job in ((1, brain.prepare_briefings), (5, brain.check_builds)):
+            if tick % every == 0:
+                try:
+                    await job()
+                except Exception:
+                    log.exception("%s failed", job.__name__)
 
 
 @asynccontextmanager
@@ -79,6 +83,31 @@ async def briefing(dev: str = Depends(device)) -> str:
 @app.get("/v1/briefing/audio")
 async def briefing_audio(dev: str = Depends(device)) -> FileResponse:
     return FileResponse(await brain.briefing_audio(dev), media_type="audio/mpeg")
+
+
+@app.get("/healthz", response_class=PlainTextResponse)
+async def healthz() -> str:
+    return "ok"
+
+
+@app.get("/v1/profile")
+async def profile(dev: str = Depends(device)) -> dict:
+    return brain.profile(dev)
+
+
+@app.get("/v1/notices")
+async def notices(dev: str = Depends(device)) -> list[str]:
+    return brain.notices_for(dev)
+
+
+class VoiceLog(BaseModel):
+    seconds: float = Field(ge=0, le=86400)
+    transcript: list[dict[str, str]] = Field(default_factory=list, max_length=2000)
+
+
+@app.post("/v1/voice-log", status_code=204)
+async def voice_log(body: VoiceLog, dev: str = Depends(device)) -> None:
+    brain.voice_log(dev, body.seconds, body.transcript)
 
 
 @app.get("/v1/sessions/{session}/stats")

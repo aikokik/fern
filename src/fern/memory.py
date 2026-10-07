@@ -28,6 +28,10 @@ class SQLiteMemory:
         rows = self.db.execute("SELECT text FROM mem WHERE mem MATCH ? ORDER BY rank LIMIT ?", (terms, k))
         return [r[0] for r in rows]
 
+    def recent(self, k: int = 10) -> list[str]:
+        """Optional extra (not in the protocol): newest facts, used for the voice profile."""
+        return [r[0] for r in self.db.execute("SELECT text FROM mem ORDER BY rowid DESC LIMIT ?", (k,))]
+
 
 def load_memory(spec: str, data_dir: Path) -> Memory:
     import importlib

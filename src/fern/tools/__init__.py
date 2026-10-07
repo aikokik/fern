@@ -6,7 +6,7 @@ from pathlib import Path
 from agents import RunContextWrapper
 
 from fern.core import Ctx, Tier, tool
-from fern.tools import device, home, news
+from fern.tools import builder, device, home, news
 
 
 def skills_index(skills_dir: Path) -> dict[str, str]:
@@ -69,8 +69,8 @@ async def recall(ctx: RunContextWrapper[Ctx], query: str) -> str:
     return "\n".join(ctx.context.memory.recall(query)) or "nothing found"
 
 
-GROUPS: dict[str, str] = dict(home.GROUPS)
-ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *home.TOOLS]
+GROUPS: dict[str, str] = home.GROUPS | builder.GROUPS
+ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *home.TOOLS, *builder.TOOLS]
 
 
 def load_plugins(mods: tuple[str, ...]) -> None:

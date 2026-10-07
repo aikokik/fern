@@ -1,0 +1,13 @@
+security-review:
+  - changed-files:
+      - any-glob-to-any-file:
+          - deploy/**
+          - .github/**
+          - .claude/**
+          - CLAUDE.md
+          - src/fern/core.py
+          - src/fern/config.py
+          - src/fern/server.py
+          - src/fern/reader.py
+          - src/fern_web/app.py
+          - src/fern_web/sideband.py

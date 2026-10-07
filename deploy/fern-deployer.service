@@ -1,0 +1,9 @@
+[Unit]
+Description=fern deploy-on-merge
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=fern
+WorkingDirectory=/home/fern/fern
+ExecStart=/home/fern/fern/deploy/deployer.sh

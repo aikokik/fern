@@ -26,6 +26,7 @@ from fern import tools
 from fern.config import Settings
 from fern.core import Ctx, http_client, untrusted
 from fern.memory import load_memory
+from fern.notify import push
 from fern.tools import news
 from fern.voice import speak
 
@@ -77,6 +78,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS meta(session TEXT, key TEXT, value TEXT, PRIMARY KEY(session, key));
             CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY, session TEXT, device TEXT, model TEXT, state TEXT, ts REAL);
             CREATE TABLE IF NOT EXISTS usage(session TEXT, model TEXT, requests INT, input INT, cached INT, output INT);
+            CREATE TABLE IF NOT EXISTS notices(id INTEGER PRIMARY KEY, text TEXT, ts REAL);
+            CREATE TABLE IF NOT EXISTS voice(day TEXT, device TEXT, seconds REAL);
         """)
 
     def get(self, session: str, key: str, default: Any = None) -> Any:
@@ -156,13 +159,14 @@ class Brain:
 
     def _ctx(self, device: str, session: str, **kw) -> Ctx:
         loaded = set(kw.pop("loaded", None) or self.store.get(session, "loaded", []))
-        return Ctx(self.s, self.memory, self.http, device=device, session=session, loaded=loaded, **kw)
+        return Ctx(self.s, self.memory, self.http, store=self.store, device=device, session=session, loaded=loaded, **kw)
 
     async def run(self, text: str, device: str = "cli", session: str = "default", model: str | None = None) -> dict:
         if model:
             self.store.put(session, "model", model)
         alias = self.store.get(session, "model", "main")
         ctx = self._ctx(device, session)
+        ctx.notes += [f"Mention briefly to the user: {n}" for n in self.notices_for(device)]
         result = await Runner.run(
             self.agent(alias), text, context=ctx, max_turns=12, run_config=self.run_config,
             session=SQLiteSession(session, self.s.db),
@@ -231,6 +235,78 @@ class Brain:
             return at if at + timedelta(hours=1) > now else at + timedelta(days=1)
         return at if at > now else at + timedelta(days=1)
 
+    async def announce(self, title: str, message: str, url: str | None = None) -> None:
+        """Tell the user wherever they are: phone push now, and a spoken mention in the next conversation."""
+        self.notice(f"{title}: {message}")
+        await push(self.http, self.s, title, message, url)
+
+    async def check_builds(self) -> None:
+        """Called every 5 min by the server: match Claude Code jobs to their PRs and announce CI results."""
+        s, jobs = self.s, self.store.get("_", "builds", [])
+        active = [j for j in jobs if j["status"] in ("running", "pr_open")]
+        if not (active and s.github_repo and s.github_token):
+            return
+        api = f"https://api.github.com/repos/{s.github_repo}"
+        gh = {"Authorization": f"Bearer {s.github_token}", "Accept": "application/vnd.github+json"}
+        prs = (await self.http.get(f"{api}/pulls", params={"state": "all", "per_page": 30}, headers=gh)).json()
+        prs.sort(key=lambda p: p["created_at"])
+        claimed = {j.get("pr") for j in jobs}
+        for j in active:
+            if j["status"] == "running":
+                pr = next((p for p in prs if p["head"]["ref"].startswith("claude/") and p["number"] not in claimed
+                           and _epoch(p["created_at"]) >= j["ts"] - 60), None)
+                if pr:
+                    j.update(status="pr_open", pr=pr["number"], url=pr["html_url"], title=pr["title"])
+                    claimed.add(pr["number"])
+                elif time.time() - j["ts"] > 2 * 3600:
+                    j["status"] = "stalled"
+                    await self.announce("Claude Code opened no PR", j["spec"][:120], j["session_url"])
+                    continue
+            if j["status"] != "pr_open" or not (pr := next((p for p in prs if p["number"] == j["pr"]), None)):
+                continue
+            if pr["state"] == "closed":
+                j["status"] = "merged" if pr.get("merged_at") else "closed"
+                continue
+            runs = (await self.http.get(f"{api}/commits/{pr['head']['sha']}/check-runs", headers=gh)).json()
+            runs = runs.get("check_runs", [])
+            if runs and all(r["status"] == "completed" for r in runs):
+                ok = all(r["conclusion"] in ("success", "skipped", "neutral") for r in runs)
+                j["status"] = "ready" if ok else "ci_failed"
+                flag = " (security-review)" if any(l["name"] == "security-review" for l in pr["labels"]) else ""
+                title = "Change ready for review" if ok else "Change failed CI"
+                await self.announce(title, f"PR #{pr['number']}: {pr['title']}{flag}", pr["html_url"])
+        self.store.put("_", "builds", jobs)
+
+    def notice(self, text: str) -> None:
+        """Something every device should hear about (build ready, deploy done). Delivered once per device."""
+        with self.store.db:
+            self.store.db.execute("INSERT INTO notices(text, ts) VALUES (?, ?)", (text[:300], time.time()))
+
+    def notices_for(self, device: str) -> list[str]:
+        seen = self.store.get("_", f"notices_seen:{device}", 0)
+        rows = self.store.db.execute("SELECT id, text FROM notices WHERE id > ? ORDER BY id", (seen,)).fetchall()
+        if rows:
+            self.store.put("_", f"notices_seen:{device}", rows[-1][0])
+        return [t for _, t in rows]
+
+    def profile(self, device: str) -> dict:
+        """Short personal context for the voice front-end, plus today's voice usage for its cost cap."""
+        recent = getattr(self.memory, "recent", None)
+        q = "SELECT COALESCE(SUM(seconds), 0) FROM voice WHERE day=? AND device=?"
+        return {
+            "device": device,
+            "facts": recent(8) if recent else [],
+            "voice_seconds_today": self.store.db.execute(q, (f"{self.s.now():%Y-%m-%d}", device)).fetchone()[0],
+        }
+
+    def voice_log(self, device: str, seconds: float, transcript: list[dict]) -> None:
+        with self.store.db:
+            self.store.db.execute("INSERT INTO voice VALUES (?,?,?)", (f"{self.s.now():%Y-%m-%d}", device, seconds))
+        self.store.log({
+            "ts": datetime.now().isoformat(), "session": f"{device}-voice", "device": device, "voice": True,
+            "seconds": round(seconds, 1), "transcript": transcript,
+        })
+
     def _finish(self, result: Any, ctx: Ctx, alias: str, text: str) -> dict:
         self.store.put(ctx.session, "loaded", sorted(ctx.loaded))
         if alarms := [self._next(c["time"]).timestamp() for c in ctx.commands if c["type"] == "alarm.set"]:
@@ -263,6 +339,10 @@ class Brain:
             "usage": {"input": u.input_tokens, "cached": cached, "output": u.output_tokens},
         })
         return out
+
+
+def _epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
 async def _untrusted_output(result: Any) -> str:

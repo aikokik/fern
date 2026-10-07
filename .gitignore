@@ -4,3 +4,6 @@ data/
 __pycache__/
 logs/
 *.eval
+deploy/.deployed
+deploy/.bad
+deploy/backup.env

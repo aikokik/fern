@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mac: cp deploy/com.fern.deployer.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.fern.deployer.plist
+     Edit the path below to your deploy clone (e.g. ~/fern-deploy), not your dev checkout. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.fern.deployer</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>-lc</string><string>$HOME/fern-deploy/deploy/deployer.sh</string></array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>/tmp/fern-deployer.log</string>
+  <key>StandardErrorPath</key><string>/tmp/fern-deployer.log</string>
+</dict>
+</plist>

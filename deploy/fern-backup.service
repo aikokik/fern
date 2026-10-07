@@ -1,0 +1,9 @@
+[Unit]
+Description=fern encrypted backup of data/ (restic)
+
+[Service]
+Type=oneshot
+# root: data/ is owned by the container user (10001, mode 700), so only root can read it for backup.
+EnvironmentFile=/home/fern/fern/deploy/backup.env
+ExecStart=/usr/bin/restic backup /home/fern/fern/data --tag fern
+ExecStartPost=/usr/bin/restic forget --keep-daily 14 --keep-weekly 8 --prune

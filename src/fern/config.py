@@ -24,7 +24,9 @@ class Settings:
     approval: str = os.getenv("FERN_APPROVAL", "on-risk")
     # App-level egress allowlist (the Docker proxy enforces the same list at network level).
     allowed_hosts: frozenset[str] = frozenset(
-        os.getenv("FERN_ALLOWED_HOSTS", "api.openai.com,hacker-news.firebaseio.com").split(",")
+        os.getenv(
+            "FERN_ALLOWED_HOSTS", "api.openai.com,hacker-news.firebaseio.com,api.anthropic.com,api.github.com,ntfy.sh"
+        ).split(",")
     )
     device_tokens: dict[str, str] = field(default_factory=lambda: _kv(os.getenv("FERN_DEVICE_TOKENS", "")))
     reader_url: str = os.getenv("FERN_READER_URL", "")  # set in Docker; empty = read articles in-process
@@ -35,6 +37,13 @@ class Settings:
     tracing: bool = os.getenv("FERN_TRACING") == "1"  # opt-in upload of traces to OpenAI's dashboard
     max_history_turns: int = int(os.getenv("FERN_MAX_TURNS_KEPT", "8"))
     tool_output_chars: int = int(os.getenv("FERN_TOOL_OUTPUT_CHARS", "4000"))
+    # Claude Code builder (Routine API trigger) + GitHub status (read-only token) + push notifications (ntfy).
+    builder_url: str = os.getenv("FERN_BUILDER_URL", "")
+    builder_token: str = os.getenv("FERN_BUILDER_TOKEN", "")
+    github_repo: str = os.getenv("FERN_GITHUB_REPO", "")  # owner/name
+    github_token: str = os.getenv("FERN_GITHUB_TOKEN", "")
+    ntfy_server: str = os.getenv("FERN_NTFY_SERVER", "https://ntfy.sh")
+    ntfy_topic: str = os.getenv("FERN_NTFY_TOPIC", "")
     tz: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
     # Briefing voice (OpenAI TTS). Short replies are spoken on-device by the phone instead.
     tts_model: str = os.getenv("FERN_TTS_MODEL", "gpt-4o-mini-tts")

@@ -1,0 +1,41 @@
+:root {
+  --bg: #f4f1ea; --fg: #1d2420; --muted: #6b726d; --accent: #2f6b4f; --card: #fffdf8; --line: #e2ddd2;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #10201a; --fg: #e8ede9; --muted: #93a19a; --accent: #6fcf9b; --card: #172b23; --line: #24382f; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100dvh; background: var(--bg); color: var(--fg);
+  font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+}
+main { max-width: 34rem; margin: 0 auto; }
+header { display: flex; justify-content: space-between; align-items: center; padding-block: 12px; }
+h1 { font-size: 1.4rem; letter-spacing: .02em; margin: 0; }
+button, .button {
+  font: inherit; border: 0; border-radius: 999px; padding: .6rem 1.1rem; cursor: pointer;
+  background: var(--accent); color: var(--bg); text-decoration: none; display: inline-block;
+}
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+form { display: grid; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+input { font: inherit; padding: .6rem; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+
+#stage { display: grid; justify-items: center; gap: 14px; padding-block: 8vh 4vh; }
+#mic { width: 132px; height: 132px; padding: 0; position: relative; box-shadow: 0 8px 30px rgb(0 0 0 / .15); }
+#mic span { position: absolute; inset: 38%; border-radius: 50%; background: var(--bg); transition: transform .2s; }
+body[data-state="live"] #mic span { border-radius: 6px; inset: 40%; }
+body[data-state="live"] #mic { animation: breathe 2.4s ease-in-out infinite; }
+body[data-state="connecting"] #mic { opacity: .6; }
+@keyframes breathe { 50% { box-shadow: 0 0 0 18px color-mix(in srgb, var(--accent) 18%, transparent); } }
+@media (prefers-reduced-motion: reduce) { body[data-state="live"] #mic { animation: none; } }
+#status { color: var(--muted); margin: 0; text-align: center; }
+
+#cards article { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+#cards h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 4px; }
+#cards p { margin: 0 0 10px; overflow-wrap: anywhere; }
+#cards div { display: flex; gap: 8px; }
+#log p { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; max-width: 85%; }
+#log .you { background: var(--card); margin-left: auto; }
+#log .fern { border: 1px solid var(--line); }

@@ -1,10 +1,13 @@
-# fern: household AI brain
+# fern: household AI
 
 ```
-device (Shortcut/iPad/TV/laptop) ──HTTPS+token──▶ ingress ─▶ brain (sealed net, read-only, non-root) ─▶ egress proxy (allowlist) ─▶ internet
-                                                             ├─ fern (main model): core tools, deferred groups, skills, memory, MCP
-                                                             └─ news_desk (fast model, subagent): reads untrusted content, no side-effect tools
-                                                                  └─ reader container: HN item id → article text (only open egress; no URLs, no private IPs)
+phone/laptop ─Tailscale HTTPS─▶ ingress ─▶ web (src/fern_web: voice UI, Realtime handshake + server channel, /v1 pass-through)
+     │ WebRTC audio ──▶ OpenAI Realtime ◀── server channel (tool calls) ──┘          │ device token
+                                                                                     ▼
+                                       brain (src/fern: API only, sealed net, read-only, non-root) ─▶ egress proxy (allowlist)
+                                        ├─ fern (main model): tools, deferred groups, skills, memory, approvals, scheduler
+                                        ├─ news_desk (fast model): untrusted content, no side-effect tools ─▶ reader container
+                                        └─ request_change (approved spec) ─▶ Claude Code Routine ─▶ PR ─▶ you merge ─▶ deployer
 ```
 
 ## Run
@@ -13,8 +16,9 @@ uv sync
 cp .env.example .env            # set OPENAI_API_KEY; tokens via `openssl rand -hex 24`
 set -a; . ./.env; set +a
 uv run fern chat                 # REPL: /model <alias>  /session  /new  /quit
-uv run fern serve                # API on 127.0.0.1:8765
-cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed (FERN_PORT/FERN_BIND to change port/IP)
+uv run fern serve                # brain API on 127.0.0.1:8765
+uv run fern-web                  # voice web app on 127.0.0.1:8766 (talks to the brain; http://localhost works for the mic)
+cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed; entry point 127.0.0.1:8766 (FERN_PORT)
 ```
 
 ## API (header `Authorization: Bearer <device token>`)
@@ -26,7 +30,9 @@ cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed (FERN
 | `GET /v1/briefing/audio` | the same as mp3 (OpenAI TTS) |
 | `GET /v1/sessions/{s}/stats` | tokens + cache-hit per model |
 
-**iPhone voice:** see [docs/iphone.md](docs/iphone.md) (Siri shortcut + alarm-stop automation).
+Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` (used by the web app).
+
+**Docs:** [iPhone + voice web app](docs/iphone.md) · [Claude Code builder](docs/builder.md) · [always-on hosting](docs/hosting.md)
 
 ## Extend
 - **Tool:** `@tool(Tier.READ|ACT|RISKY, group=...)` in a module with `TOOLS` (+ `GROUPS`); `FERN_PLUGINS=my.module`.

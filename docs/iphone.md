@@ -1,27 +1,37 @@
-# iPhone voice setup
+# iPhone setup
 
-Voice split: **Apple** listens (Siri dictation, on-device) and speaks short replies (Speak Text).
-**OpenAI TTS** reads the morning briefing (natural voice; pre-generated ~15 min before alarms set through fern).
+Two ways to talk to fern:
+- **Voice web app** (conversation mode, interruptible, OpenAI Realtime): open `<address>` in Safari.
+- **Shortcuts** (Siri dictation / Back Tap / Action Button, Apple voice) plus the alarm-stop briefing automation.
 
 ## 1. Make fern reachable from the phone
 
-The Mac must be **awake and plugged in** at alarm time (`caffeinate -s` keeps it awake on power; lid closed = asleep).
+1. Install **Tailscale** on the host (Mac or server) and the iPhone, same account.
+2. On the host: `cd deploy && docker compose up -d --build`, then `tailscale serve --bg https / http://127.0.0.1:8766`.
+3. Your `<address>` is the `https://<host>.<tailnet>.ts.net` URL that `tailscale serve status` prints.
+   HTTPS is required: browsers only allow the microphone on secure pages.
 
-| | Home Wi-Fi only (start here) | Anywhere (recommended) |
-|---|---|---|
-| Setup | nothing | install Tailscale on Mac + iPhone, same account |
-| Address | `http://<Mac LAN IP>:8766` (`ipconfig getifaddr en0`) | `http://<tailscale ip -4>:8766` |
-| Run | `FERN_BIND=<that IP> FERN_PORT=8766 docker compose up -d` (in `deploy/`) | same |
+The host must be on and awake (a Mac: plugged in, `caffeinate -s`; lid closed = asleep). A server avoids this:
+see [hosting.md](hosting.md). Your phone token: the `phone=` value of `FERN_DEVICE_TOKENS` in `.env`.
 
-Without Docker: `caffeinate -s uv run fern serve --host <that IP> --port 8766`.
-Your phone token: the `phone=` value of `FERN_DEVICE_TOKENS` in `.env`.
+## 1b. Voice web app
 
-## 2. Shortcut "Fern" (say "Hey Siri, Fern")
+1. Safari → `<address>` → tap ⚙ → paste your phone token → Save.
+2. Share → **Add to Home Screen** (opens full-screen like an app).
+3. Tap the mic: it keeps listening and answering until you say "stop listening"/"bye", tap again, or stay silent
+   for 2 minutes. You can interrupt it mid-sentence.
+4. Risky actions show an **Approve / Reject** card: approval needs a tap; a spoken "yes" never counts.
+5. Alarms show **Add to Clock**. Create this helper once: Shortcuts → **+** → name **Fern Alarm** → actions
+   **Receive Text input from Share Sheet/Shortcuts** (default) → **Create Alarm** at *Shortcut Input*.
+
+iPhone only lets web pages use the mic while the page is open and the screen is on.
+
+## 2. Shortcut "Fern" (Back Tap, Action Button, or "Hey Siri, Fern")
 
 Shortcuts app → **+** → name it **Fern** → add actions:
 
 1. **Dictate Text** (Stop Listening: After Pause)
-2. **Get Contents of URL**: `http://<address>/v1/chat`
+2. **Get Contents of URL**: `<address>/v1/chat`
    - Method **POST**, Headers: `Authorization` = `Bearer <phone token>`
    - Request Body **JSON**: `text` = *Dictated Text*
 3. **Get Dictionary Value**: `commands` in *Contents of URL*
@@ -36,7 +46,7 @@ Try: "Hey Siri, Fern" → "wake me at 6:30".
 
 Shortcuts → **Automation** → **+** → **Alarm** → **Is Stopped** → Any → **Run Immediately** → actions:
 
-1. **Get Contents of URL**: `http://<address>/v1/briefing/audio`, Method **GET**, Header `Authorization` = `Bearer <phone token>`
+1. **Get Contents of URL**: `<address>/v1/briefing/audio`, Method **GET**, Header `Authorization` = `Bearer <phone token>`
 2. **Play Sound**: *Contents of URL*
 
 Fallback (Apple voice, no OpenAI TTS): use `/v1/briefing` and **Speak Text** instead.
@@ -44,4 +54,5 @@ Fallback (Apple voice, no OpenAI TTS): use `/v1/briefing` and **Speak Text** ins
 ## Notes
 - First briefing of the day takes ~30–40 s if it wasn't pre-generated. Alarms set through fern are pre-generated
   automatically; for alarms set in the Clock app, list your usual times in `FERN_BRIEFING_AT=07:00,08:30`.
-- Approvals (risky actions) come back in `pending`; approve with `POST /v1/approvals/<id>` `{"approve": true}`.
+- Approvals (risky actions) come back in `pending`; the voice web app shows them as cards, or approve with
+  `POST /v1/approvals/<id>` `{"approve": true}`.

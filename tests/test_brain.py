@@ -157,3 +157,64 @@ async def test_reader_refuses_private_addresses():
     for url in ("http://127.0.0.1:8765/v1/chat", "http://localhost/", "http://192.168.1.1/"):
         with pytest.raises(httpx.ConnectError):
             await reader._public_only(httpx.Request("GET", url))
+
+
+async def test_notices_profile_voice_log(brain):
+    brain.notice("TV control is ready")
+    assert brain.notices_for("phone") == ["TV control is ready"]
+    assert brain.notices_for("phone") == []  # delivered once per device
+    assert brain.notices_for("ipad") == ["TV control is ready"]
+
+    brain.memory.remember("Sam wakes at 07:00")
+    brain.voice_log("phone", 42.0, [{"role": "user", "text": "hi"}])
+    p = brain.profile("phone")
+    assert p["facts"] == ["Sam wakes at 07:00"] and p["voice_seconds_today"] == 42.0
+    assert brain.profile("ipad")["voice_seconds_today"] == 0
+    assert '"voice": true' in brain.store.traj.read_text()
+
+
+async def test_request_change_needs_approval_then_fires_exact_spec(tmp_path):
+    s = Settings(data_dir=tmp_path, skills_dir=Settings().skills_dir, builder_url="https://api.anthropic.com/v1/fire",
+                 builder_token="rt", github_repo="me/fern", github_token="gh", ntfy_topic="topic123")
+    sent = []
+
+    def world2(req: httpx.Request) -> httpx.Response:
+        sent.append((req.url.host, req.url.path, req.content.decode(), dict(req.headers)))
+        if req.url.host == "api.anthropic.com":
+            return httpx.Response(200, json={"claude_code_session_url": "https://claude.ai/code/session_1"})
+        if req.url.path.endswith("/pulls"):
+            return httpx.Response(200, json=[{
+                "number": 7, "title": "Add TV control", "html_url": "https://github.com/me/fern/pull/7",
+                "created_at": "2099-01-01T00:00:00Z", "state": "open", "merged_at": None,
+                "head": {"ref": "claude/tv", "sha": "abc"}, "labels": [{"name": "security-review"}]}])
+        if "check-runs" in req.url.path:
+            return httpx.Response(200, json={"check_runs": [{"status": "completed", "conclusion": "success"}]})
+        return httpx.Response(200)
+
+    async with Brain(s) as b:
+        b.http._transport = httpx.MockTransport(world2)
+        spec = "Add a tv plugin: media_player on/off/volume via Home Assistant, with tests."
+        b.agent().model = ScriptedModel([
+            [function_call("load_tools", {"group": "builder"}, call_id="c1")],
+            [function_call("request_change", {"kind": "change", "spec": spec}, call_id="c2")],
+            [assistant_message("Claude Code is on it.")],
+        ])
+        out = await b.run("tell claude code to add TV control", session="s9")
+        assert out["pending"][0]["tool"] == "request_change" and not sent  # nothing fired before approval
+        assert spec in out["pending"][0]["args"]  # user sees the exact spec
+
+        await b.resolve(out["pending"][0]["id"], approve=True)
+        host, _, body, headers = sent[0]
+        assert host == "api.anthropic.com" and json.loads(body)["text"].endswith(spec)
+        assert headers["authorization"] == "Bearer rt" and "anthropic-beta" in headers
+
+        await b.check_builds()
+        job = b.store.get("_", "builds")[0]
+        assert job["status"] == "ready" and job["pr"] == 7
+        push = next(x for x in sent if x[0] == "ntfy.sh")
+        assert push[1] == "/topic123" and "PR #7: Add TV control (security-review)" in push[2]
+        assert push[3]["click"] == "https://github.com/me/fern/pull/7"
+        n_sent = len(sent)
+        await b.check_builds()  # already announced: no duplicate push
+        assert not any(x[0] == "ntfy.sh" for x in sent[n_sent:])
+        assert b.notices_for("phone") == ["Change ready for review: PR #7: Add TV control (security-review)"]

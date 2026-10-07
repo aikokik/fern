@@ -25,6 +25,7 @@ class Ctx:
     settings: Settings
     memory: Memory
     http: httpx.AsyncClient
+    store: Any = None  # fern.brain.Store (typed loosely to avoid an import cycle)
     device: str = "cli"
     session: str = "default"
     loaded: set[str] = field(default_factory=set)       # deferred tool groups loaded this run
