@@ -44,6 +44,8 @@ def fake_brain(recorded_calls: list, voice_seconds_today: float = 0, chat_status
                         "pending": [{"id": "a" * 32, "tool": "home_secure", "args": "{}"}],
                     },
                 )
+            case path if path.startswith("/v1/approvals/"):
+                return httpx.Response(200, json={"reply": "Claude Code started.", "commands": [], "pending": []})
             case "/v1/notices":
                 return httpx.Response(200, json=[])
             case "/v1/voice-log":
@@ -123,7 +125,8 @@ async def test_tool_call_runs_on_server_channel():
     tool_output = connection.sent[0]["item"]
     assert tool_output["type"] == "function_call_output"
     assert tool_output["call_id"] == "c1"
-    assert "tap Approve" in tool_output["output"]  # spoken yes can't approve
+    assert "Needs approval: home_secure" in tool_output["output"]
+    assert "approve?" in tool_output["output"]
     assert connection.sent[1] == {"type": "response.create"}
     assert ("POST", "/v1/chat", {"text": "unlock the door", "session": "voice"}) in recorded_calls
     alarm = {"type": "alarm.set", "time": "07:00", "label": ""}
@@ -187,6 +190,54 @@ async def test_tool_result_waits_until_the_model_pauses():
     await run_task
 
 
+async def ask_and_answer(spoken_answer: str, approve: bool) -> tuple[FakeRealtimeConnection, list]:
+    """fern pauses on a risky action; the user answers out loud; the model calls decide_approval."""
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    run_task = asyncio.create_task(session.run())
+    await connection.incoming.put(response_done("completed", '{"request": "plan TV control"}', call_id="c1"))
+    await wait_until(lambda: len(connection.sent) >= 2)  # "Needs approval ... approve?"
+    await connection.incoming.put(
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript=spoken_answer)
+    )
+    decision = SimpleNamespace(
+        type="function_call", name="decide_approval", call_id="c2", arguments=json.dumps({"approve": approve})
+    )
+    await connection.incoming.put(
+        SimpleNamespace(type="response.done", response=SimpleNamespace(status="completed", output=[decision]))
+    )
+    await wait_until(lambda: len(connection.sent) >= 4)
+    await session.close()
+    await run_task
+    return connection, recorded_calls
+
+
+async def test_voice_approval_requires_a_spoken_yes():
+    connection, recorded_calls = await ask_and_answer("yes, go ahead", approve=True)
+    assert connection.sent[2]["item"]["output"].startswith("Approved.")
+    assert any(call[1].startswith("/v1/approvals/") and call[2] == {"approve": True} for call in recorded_calls)
+
+    connection, recorded_calls = await ask_and_answer("no, don't do it", approve=True)  # model misheard
+    assert connection.sent[2]["item"]["output"].startswith("Not approved")
+    assert not any(call[1].startswith("/v1/approvals/") for call in recorded_calls)
+
+    connection, recorded_calls = await ask_and_answer("no thanks", approve=False)  # rejecting needs no proof
+    assert connection.sent[2]["item"]["output"].startswith("Rejected.")
+
+
+async def test_goodbye_is_spoken_once():
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    run_task = asyncio.create_task(session.run())
+    goodbye = SimpleNamespace(type="function_call", name="end_conversation", call_id="c1", arguments="{}")
+    await connection.incoming.put(
+        SimpleNamespace(type="response.done", response=SimpleNamespace(status="completed", output=[goodbye]))
+    )
+    await asyncio.wait_for(run_task, 10)
+    assert connection.sent[0]["item"]["type"] == "function_call_output"
+    assert {"type": "response.create"} not in connection.sent  # no second goodbye
+
+
 async def test_say_injects_system_message():
     connection, recorded_calls = FakeRealtimeConnection(), []
     session = voice_session(connection, recorded_calls)
@@ -245,7 +296,8 @@ async def test_call_handshake_server_side(web_client):
     assert started_calls == ["rtc_abc"]
     session_config = handshake["session"]
     assert session_config["model"]
-    assert {function["name"] for function in session_config["tools"]} == {"ask_fern", "end_conversation"}
+    tool_names = {function["name"] for function in session_config["tools"]}
+    assert tool_names == {"ask_fern", "decide_approval", "end_conversation"}
     assert "Sam wakes at 7" in session_config["instructions"]  # personalization
     assert session_config["max_output_tokens"] > 0  # spoken replies are capped
     assert "connect-src 'self';" in response.headers["content-security-policy"]

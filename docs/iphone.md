@@ -20,7 +20,8 @@ see [hosting.md](hosting.md). Your phone token: the `phone=` value of `FERN_DEVI
 2. Share → **Add to Home Screen** (opens full-screen like an app).
 3. Tap the mic: it keeps listening and answering until you say "stop listening"/"bye", tap again, or stay silent
    for 2 minutes. You can interrupt it mid-sentence.
-4. Risky actions show an **Approve / Reject** card: approval needs a tap; a spoken "yes" never counts.
+4. Risky actions: fern says what will happen and asks "Approve?". Answer **yes / no out loud** (only your own
+   transcribed speech after the question counts), or tap the card.
 5. Alarms show **Add to Clock**. Create this helper once: Shortcuts → **+** → name **Fern Alarm** → actions
    **Receive Text input from Share Sheet/Shortcuts** (default) → **Create Alarm** at *Shortcut Input*.
 

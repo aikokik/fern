@@ -93,6 +93,7 @@ async function followFernEvents(id) {
 function onFernEvent(event) {
   if (event.type === "end") { if (sessionId) stop(); }
   else if (event.type === "pending") showApprovalCard(event);
+  else if (event.type === "resolved") resolveApprovalCards(event.approved);
   else if (event.type === "error") addCard("Something went wrong", `${event.message} · check fern logs for ref ${event.reference}`);
   else if (event.type === "command" && event.command.type === "alarm.set") showAlarmCard(event.command);
 }
@@ -111,6 +112,7 @@ function addCard(title, detail) {
 function showApprovalCard(pending) {
   const card = addCard("Approve?", `${pending.tool} ${pending.args}`);
   const buttons = document.createElement("div");
+  buttons.className = "approval-buttons";
   for (const [label, approve] of [["Approve", true], ["Reject", false]]) {
     const button = document.createElement("button");
     button.textContent = label;
@@ -124,6 +126,13 @@ function showApprovalCard(pending) {
     buttons.append(button);
   }
   card.append(buttons);
+}
+
+function resolveApprovalCards(approved) {
+  for (const buttons of document.querySelectorAll("#cards .approval-buttons")) {
+    buttons.closest("article").querySelector("p").textContent += approved ? " ✓ approved by voice" : " ✗ rejected by voice";
+    buttons.remove();
+  }
 }
 
 function showAlarmCard(command) {

@@ -7,16 +7,20 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import secrets
 import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from fern_web.brain_client import BrainClient
+from fern_web.brain_client import BrainClient, BrainError
 
 log = logging.getLogger("fern_web")
-GOODBYE_SECONDS = 4  # let the spoken goodbye finish before hanging up
+GOODBYE_SECONDS = 3  # let the spoken goodbye finish before hanging up
+TRANSCRIPT_WAIT_SECONDS = 3  # transcription of the user's "yes" can land just after the model's tool call
+SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|approved?|confirm(ed)?|go ahead|do it|send it|sure|okay|ok)\b", re.I)
+SPOKEN_NO = re.compile(r"\b(no|nope|don'?t|do not|cancel|reject(ed)?|stop|wait)\b", re.I)
 
 
 class VoiceSession:
@@ -49,6 +53,11 @@ class VoiceSession:
         self.closed = asyncio.Event()
         self._tool_tasks: set[asyncio.Task] = set()  # strong refs: asyncio only keeps weak ones
         self._brain_lock = asyncio.Lock()  # one brain request at a time per session keeps its history ordered
+        self.awaiting_approval: list[dict] = []  # risky actions the brain paused on
+        self.awaiting_since = 0.0
+        self.last_user_words = ""
+        self.user_spoke_at = 0.0
+        self._user_spoke = asyncio.Event()
         self.task: asyncio.Task | None = None  # set by whoever starts run()
 
     async def run(self) -> None:
@@ -77,7 +86,9 @@ class VoiceSession:
         if event_type == "input_audio_buffer.speech_started":
             self.last_activity_at = time.monotonic()
         elif event_type == "conversation.item.input_audio_transcription.completed":
-            self.last_activity_at = time.monotonic()
+            self.last_activity_at = self.user_spoke_at = time.monotonic()
+            self.last_user_words = event.transcript
+            self._user_spoke.set()
             self.transcript.append({"role": "user", "text": event.transcript})
         elif event_type == "response.output_audio_transcript.done":
             self.transcript.append({"role": "assistant", "text": event.transcript})
@@ -105,21 +116,26 @@ class VoiceSession:
             task.add_done_callback(self._tool_tasks.discard)
 
     async def _run_tool(self, name: str, call_id: str, arguments: str) -> None:
-        if name == "end_conversation":
-            await self._send_tool_output(call_id, "ok")
+        try:
+            parsed_arguments = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            log.warning("%s got malformed arguments: %.80r", name, arguments)
+            await self._send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
+            return
+        if name == "ask_fern":
+            await self._ask_fern(call_id, parsed_arguments.get("request", ""))
+        elif name == "decide_approval":
+            await self._decide_approval(call_id, bool(parsed_arguments.get("approve")))
+        elif name == "end_conversation":
+            # No new response: the model already said its goodbye in the turn that called this tool.
+            await self._send_tool_output(call_id, "ok", respond=False)
             await asyncio.sleep(GOODBYE_SECONDS)
             self.closed.set()
             await self.close()
-            return
-        if name != "ask_fern":
+        else:
             await self._send_tool_output(call_id, f"unknown tool {name}")
-            return
-        try:
-            request = json.loads(arguments or "{}").get("request", "")
-        except json.JSONDecodeError:
-            log.warning("ask_fern got malformed arguments: %.80r", arguments)
-            await self._send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
-            return
+
+    async def _ask_fern(self, call_id: str, request: str) -> None:
         try:
             async with self._brain_lock:
                 brain_response = await self.brain.chat(self.device_token, request)
@@ -133,18 +149,62 @@ class VoiceSession:
                 f"wrong and to check the fern logs for reference {reference}.",
             )
             return
+        log.info("ask_fern: tools=%s pending=%d", brain_response.get("tools"), len(brain_response.get("pending", [])))
         await self.publish(brain_response)
-        reply = brain_response.get("reply") or ""
-        if brain_response.get("pending"):
-            reply += " (Waiting for the user to tap Approve or Reject on screen.)"
-        await self._send_tool_output(call_id, reply)
+        await self._send_tool_output(call_id, self._describe(brain_response))
+
+    async def _decide_approval(self, call_id: str, approve: bool) -> None:
+        if not self.awaiting_approval:
+            await self._send_tool_output(call_id, "Nothing is waiting for approval.")
+            return
+        if approve and not await self._user_said_yes():
+            log.info("voice approval refused: no clear spoken yes")
+            await self._send_tool_output(call_id, "Not approved: the user must say yes out loud. Ask them again.")
+            return
+        replies = []
+        for pending in self.awaiting_approval:
+            try:
+                brain_response = await self.brain.approve(self.device_token, pending["id"], approve)
+            except BrainError as error:
+                replies.append("That approval expired." if error.status == 404 else "Approval failed.")
+                continue
+            await self.publish(brain_response)
+            replies.append(self._describe(brain_response))
+        self.awaiting_approval = []
+        await self.browser_events.put({"type": "resolved", "approved": approve})
+        verdict = "Approved." if approve else "Rejected."
+        await self._send_tool_output(call_id, f"{verdict} {' '.join(replies)}")
+
+    async def _user_said_yes(self) -> bool:
+        """Approval is tied to the user's real transcribed speech after the question, never the model's say-so,
+        so text inside a tool result can't approve anything."""
+        self._user_spoke.clear()
+        if self.user_spoke_at <= self.awaiting_since:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._user_spoke.wait(), TRANSCRIPT_WAIT_SECONDS)
+        if self.user_spoke_at <= self.awaiting_since:
+            return False
+        return bool(SPOKEN_YES.search(self.last_user_words)) and not SPOKEN_NO.search(self.last_user_words)
+
+    def _describe(self, brain_response: dict) -> str:
+        """Tool output for the voice model: short, and for paused actions, what needs a yes/no."""
+        pending = brain_response.get("pending", [])
+        if not pending:
+            return brain_response.get("reply") or ""
+        actions = "; ".join(f"{action['tool']} {action['args'][:300]}" for action in pending)
+        return f"Needs approval: {actions}. Say in one sentence what will happen, then ask: approve?"
 
     async def publish(self, brain_response: dict) -> None:
-        """Brain side effects the browser must act on: device commands and approval cards."""
+        """Brain side effects: device commands and approval cards for the browser; remember paused actions."""
         for command in brain_response.get("commands", []):
             await self.browser_events.put({"type": "command", "command": command})
         for pending in brain_response.get("pending", []):
+            self.awaiting_approval.append(pending)
+            self.awaiting_since = time.monotonic()
             await self.browser_events.put({"type": "pending", **pending})
+
+    def resolved_on_screen(self, pending_id: str) -> None:
+        self.awaiting_approval = [pending for pending in self.awaiting_approval if pending["id"] != pending_id]
 
     async def _wait_for_pause(self) -> bool:
         """Results arrive asynchronously; never cut into what the model is saying. False if the session ended."""
@@ -170,7 +230,7 @@ class VoiceSession:
         )
         await self.connection.send({"type": "response.create"})
 
-    async def _send_tool_output(self, call_id: str, output: str) -> None:
+    async def _send_tool_output(self, call_id: str, output: str, respond: bool = True) -> None:
         if not await self._wait_for_pause():
             return
         await self.connection.send(
@@ -183,7 +243,8 @@ class VoiceSession:
                 },
             }
         )
-        await self.connection.send({"type": "response.create"})
+        if respond:
+            await self.connection.send({"type": "response.create"})
 
     async def _enforce_limits(self) -> None:
         while not self.closed.is_set():

@@ -57,8 +57,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     arguments = parser.parse_args()
     if arguments.command == "serve":
+        import logging
+
         import uvicorn
 
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
         uvicorn.run("fern.server:app", host=arguments.host, port=arguments.port)
     else:
         asyncio.run(chat() if arguments.command == "chat" else briefing())

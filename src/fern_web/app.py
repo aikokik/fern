@@ -178,6 +178,7 @@ async def approve(body: Decision, device_token: str = Depends(bearer_token)) -> 
             raise HTTPException(502) from error
         await voice_session.say("Notice: that approval expired; ask the user to repeat the request if needed.")
         raise HTTPException(404, "Approval expired") from error
+    voice_session.resolved_on_screen(body.pending_id)
     await voice_session.publish(brain_response)
     verdict = "approved" if body.approve else "rejected"
     await voice_session.say(f"Notice: the user {verdict} the action. Result: {brain_response.get('reply', '')}")
@@ -215,8 +216,11 @@ async def brain_api(path: str, request: Request) -> Response:
 
 
 def main() -> None:
+    import logging
+
     import uvicorn
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="fern-web")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
