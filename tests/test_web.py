@@ -17,7 +17,7 @@ AUTHORIZED = {"Authorization": f"Bearer {DEVICE_TOKEN}"}
 OFFER = {"sdp": "v=0 offer-sdp"}
 
 
-def fake_brain(recorded_calls: list, voice_seconds_today: float = 0) -> httpx.MockTransport:
+def fake_brain(recorded_calls: list, voice_seconds_today: float = 0, chat_status: int = 200) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         recorded_calls.append((request.method, request.url.path, json.loads(request.content or b"null")))
         if request.headers["authorization"] != f"Bearer {DEVICE_TOKEN}":
@@ -32,6 +32,8 @@ def fake_brain(recorded_calls: list, voice_seconds_today: float = 0) -> httpx.Mo
                         "voice_seconds_today": voice_seconds_today,
                     },
                 )
+            case "/v1/chat" if chat_status != 200:
+                return httpx.Response(chat_status)
             case "/v1/chat":
                 return httpx.Response(
                     200,
@@ -73,7 +75,7 @@ class FakeRealtimeConnection:
         return event
 
 
-def voice_session(connection: FakeRealtimeConnection, recorded_calls: list) -> VoiceSession:
+def voice_session(connection: FakeRealtimeConnection, recorded_calls: list, chat_status: int = 200) -> VoiceSession:
     @asynccontextmanager
     async def connect(_call_id):
         yield connection
@@ -85,7 +87,7 @@ def voice_session(connection: FakeRealtimeConnection, recorded_calls: list) -> V
         "session-1",
         DEVICE_TOKEN,
         "rtc_1",
-        BrainClient("http://brain", fake_brain(recorded_calls)),
+        BrainClient("http://brain", fake_brain(recorded_calls, chat_status=chat_status)),
         connect,
         hangup,
         max_seconds=600,
@@ -148,6 +150,39 @@ async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain():
     assert connection.sent[0]["item"]["call_id"] == "c2"
     assert "repeat" in connection.sent[0]["item"]["output"]
     assert not any(call[1] == "/v1/chat" for call in recorded_calls)
+    await session.close()
+    await run_task
+
+
+async def test_brain_failure_is_reported_with_a_log_reference():
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls, chat_status=500)
+    run_task = asyncio.create_task(session.run())
+    await connection.incoming.put(response_done("completed", '{"request": "ask Claude Code to plan TV control"}'))
+    await wait_until(lambda: len(connection.sent) >= 2)
+
+    output = connection.sent[0]["item"]["output"]
+    error_card = await session.browser_events.get()
+    assert error_card["type"] == "error"
+    assert error_card["reference"] in output  # same reference spoken, shown and logged
+    assert "check the fern logs" in output
+    await session.close()
+    await run_task
+
+
+async def test_tool_result_waits_until_the_model_pauses():
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    run_task = asyncio.create_task(session.run())
+    await wait_until(lambda: session.connection is not None)
+    session.model_is_responding = True  # the model is mid-sentence with the user
+    tool_task = asyncio.create_task(session._run_tool("ask_fern", "c1", '{"request": "lights off"}'))
+    await wait_until(lambda: any(call[1] == "/v1/chat" for call in recorded_calls))
+    await asyncio.sleep(0.3)
+    assert connection.sent == []  # result held back, nothing interrupts the model
+    session.model_is_responding = False
+    await tool_task
+    assert connection.sent[0]["item"]["type"] == "function_call_output"
     await session.close()
     await run_task
 

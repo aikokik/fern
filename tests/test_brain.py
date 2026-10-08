@@ -228,6 +228,26 @@ async def test_reader_refuses_private_addresses():
             await reader._public_addresses_only(httpx.Request("GET", url))
 
 
+async def test_request_change_failure_returns_log_reference(make_brain):
+    brain = await make_brain(
+        lambda request: httpx.Response(503), builder_url="https://api.anthropic.com/v1/fire", builder_token="rt"
+    )
+    model = script(
+        brain,
+        [
+            [function_call("load_tools", {"group": "builder"}, call_id="c1")],
+            [function_call("request_change", {"kind": "plan", "spec": "TV control"}, call_id="c2")],
+            [assistant_message("Something went wrong.")],
+        ],
+    )
+    pending_id = (await brain.run("plan TV control", session="s11"))["pending"][0]["id"]
+    await brain.resolve(pending_id, approve=True)
+    tool_result = json.dumps(model.calls[-1].input)
+    assert "could not start Claude Code (HTTPStatusError)" in tool_result
+    assert "check the fern logs for reference" in tool_result
+    assert brain.store.get(GLOBAL, "builds", []) == []  # failed request is not tracked as a job
+
+
 async def test_notices_profile_voice_log(brain):
     brain.notice("TV control is ready")
     assert brain.notices_for("phone") == ["TV control is ready"]

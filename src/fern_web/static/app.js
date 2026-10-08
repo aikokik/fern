@@ -93,6 +93,7 @@ async function followFernEvents(id) {
 function onFernEvent(event) {
   if (event.type === "end") { if (sessionId) stop(); }
   else if (event.type === "pending") showApprovalCard(event);
+  else if (event.type === "error") addCard("Something went wrong", `${event.message} · check fern logs for ref ${event.reference}`);
   else if (event.type === "command" && event.command.type === "alarm.set") showAlarmCard(event.command);
 }
 

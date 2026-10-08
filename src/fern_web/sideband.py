@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import secrets
 import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -47,6 +48,7 @@ class VoiceSession:
         self.connection: Any = None
         self.closed = asyncio.Event()
         self._tool_tasks: set[asyncio.Task] = set()  # strong refs: asyncio only keeps weak ones
+        self._brain_lock = asyncio.Lock()  # one brain request at a time per session keeps its history ordered
         self.task: asyncio.Task | None = None  # set by whoever starts run()
 
     async def run(self) -> None:
@@ -119,10 +121,17 @@ class VoiceSession:
             await self._send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
             return
         try:
-            brain_response = await self.brain.chat(self.device_token, request)
+            async with self._brain_lock:
+                brain_response = await self.brain.chat(self.device_token, request)
         except Exception as error:
-            log.exception("ask_fern failed")
-            await self._send_tool_output(call_id, f"fern is unavailable right now ({type(error).__name__}).")
+            reference = secrets.token_hex(3)
+            log.exception("ask_fern failed [ref %s]", reference)
+            await self.browser_events.put({"type": "error", "message": type(error).__name__, "reference": reference})
+            await self._send_tool_output(
+                call_id,
+                f"Failed: the request did not reach fern ({type(error).__name__}). Tell the user something went "
+                f"wrong and to check the fern logs for reference {reference}.",
+            )
             return
         await self.publish(brain_response)
         reply = brain_response.get("reply") or ""
@@ -137,13 +146,17 @@ class VoiceSession:
         for pending in brain_response.get("pending", []):
             await self.browser_events.put({"type": "pending", **pending})
 
-    async def say(self, text: str) -> None:
-        """Inject a system message and let the model voice it, waiting for a pause first."""
-        for _attempt in range(50):  # up to ~10 s
+    async def _wait_for_pause(self) -> bool:
+        """Results arrive asynchronously; never cut into what the model is saying. False if the session ended."""
+        for _attempt in range(150):  # up to ~30 s
             if not self.model_is_responding or self.closed.is_set():
                 break
             await asyncio.sleep(0.2)
-        if self.connection is None or self.closed.is_set():
+        return self.connection is not None and not self.closed.is_set()
+
+    async def say(self, text: str) -> None:
+        """Inject a system message and let the model voice it, waiting for a pause first."""
+        if not await self._wait_for_pause():
             return
         await self.connection.send(
             {
@@ -158,6 +171,8 @@ class VoiceSession:
         await self.connection.send({"type": "response.create"})
 
     async def _send_tool_output(self, call_id: str, output: str) -> None:
+        if not await self._wait_for_pause():
+            return
         await self.connection.send(
             {
                 "type": "conversation.item.create",
