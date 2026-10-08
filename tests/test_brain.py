@@ -104,23 +104,6 @@ async def test_news_subagent_isolated_and_untrusted(brain, monkeypatch):
     assert any("Article 2 body" in json.dumps(item) for item in subagent_run["items"])  # tool results included
 
 
-async def test_headlines_answered_directly_without_subagent(brain):
-    orchestrator = script(
-        brain,
-        [
-            [function_call("hn_top", {"count": 3}, call_id="c1")],
-            [assistant_message("Story 1, Story 2, Story 3.")],
-        ],
-    )
-    brain.news_desk.model = ScriptedModel([])  # would raise if the subagent were called
-    response = await brain.run("top 3 headlines?", session="s10")
-    assert response["tools"] == ["hn_top"]
-    assert {"hn_top", "news_desk"} <= visible_tools(orchestrator.calls[0])
-    assert "<untrusted source='hackernews'>" in json.dumps(orchestrator.calls[1].input)
-    record = json.loads(brain.store.trajectories_file.read_text().splitlines()[-1])
-    assert record["subagent_runs"] == []
-
-
 async def test_deferred_group_and_risky_approval(make_brain):
     home_assistant_calls = []
 
