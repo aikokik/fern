@@ -20,6 +20,7 @@ SKIPPED_TAGS = {"script", "style", "nav", "footer", "header", "aside", "form", "
 TEXT_TAGS = {"p", "h1", "h2", "h3", "li", "pre", "blockquote", "td"}
 MAX_CHARS = 4000
 CACHE_SECONDS = 600
+CACHE_MAX_ITEMS = 200  # bounded: the reader runs for weeks
 _cache: dict[int, tuple[float, str]] = {}  # item id -> (fetched at, text)
 _client: httpx.AsyncClient | None = None
 
@@ -32,7 +33,7 @@ class _ArticleTextParser(HTMLParser):
         self.chunks: list[str] = []
         self.skipped_depth = self.text_depth = 0
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag, _attrs):
         self.skipped_depth += tag in SKIPPED_TAGS
         self.text_depth += tag in TEXT_TAGS
 
@@ -91,6 +92,8 @@ async def read(http: httpx.AsyncClient, item_id: int) -> str:
     except httpx.HTTPError as error:
         text = f"unreadable ({type(error).__name__})"
     text = text[:MAX_CHARS] or "unreadable (no text)"
+    if len(_cache) >= CACHE_MAX_ITEMS:
+        _cache.clear()
     _cache[item_id] = (time.monotonic(), text)
     return text
 

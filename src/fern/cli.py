@@ -21,7 +21,6 @@ async def chat() -> None:
     async with Brain(settings) as brain:
         print(f"fern · session {session} · {HELP}")
         while (text := await ask("> ")) != "/quit":
-            model = None
             if text == "/new":
                 session = f"cli-{uuid.uuid4().hex[:8]}"
                 print(f"new session {session}")
@@ -30,10 +29,13 @@ async def chat() -> None:
                 print(json.dumps(brain.store.stats(session), indent=1))
                 continue
             if text.startswith("/model "):
-                model, text = text.split()[1], "(model switched; acknowledge in one word)"
+                model_alias = text.split()[1]
+                brain.store.put(session, "model", model_alias)  # no model call needed just to switch
+                print(f"model: {settings.model(model_alias)}")
+                continue
             if not text:
                 continue
-            response = await brain.run(text, session=session, model=model)
+            response = await brain.run(text, session=session)
             while response["pending"]:
                 pending = response["pending"][0]
                 approved = (await ask(f"approve {pending['tool']} {pending['args']}? [y/N] ")).lower() == "y"

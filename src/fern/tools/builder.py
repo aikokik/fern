@@ -10,6 +10,7 @@ from typing import Literal
 from agents import RunContextWrapper
 
 from fern.core import FernContext, Tier, tool
+from fern.store import GLOBAL
 
 GROUPS = {"builder": "Claude Code builder: plan or implement changes to fern itself (new tools, devices, skills)."}
 FIRE_HEADERS = {"anthropic-beta": "experimental-cc-routine-2026-04-01", "anthropic-version": "2023-06-01"}
@@ -40,16 +41,16 @@ async def request_change(run: RunContextWrapper[FernContext], kind: Literal["pla
     if response.status_code >= 400:
         return f"error: builder refused the request ({response.status_code})"
     session_url = response.json().get("claude_code_session_url", "")
-    jobs = context.store.get("_", "builds", [])
+    jobs = context.store.get(GLOBAL, "builds", [])
     jobs.append({"kind": kind, "spec": spec[:300], "session_url": session_url, "ts": time.time(), "status": "running"})
-    context.store.put("_", "builds", jobs[-20:])
+    context.store.put(GLOBAL, "builds", jobs[-20:])
     return f"Claude Code started ({kind}). I'll notify you when the pull request is ready."
 
 
 @tool(Tier.READ, group="builder")
 async def build_status(run: RunContextWrapper[FernContext]) -> str:
     """Recent Claude Code requests and their pull request / CI status."""
-    recent_jobs = run.context.store.get("_", "builds", [])[-5:]
+    recent_jobs = run.context.store.get(GLOBAL, "builds", [])[-5:]
     if not recent_jobs:
         return "no builder requests yet"
     return "\n".join(

@@ -33,8 +33,7 @@ def household_brain() -> Agent:
             home_token="eval",
             tracing=False,
         )
-        async with agent_bridge(state) as bridge, Brain(eval_settings) as brain:
-            brain.http._transport = httpx.MockTransport(world)
+        async with agent_bridge(state) as bridge, Brain(eval_settings, httpx.MockTransport(world)) as brain:
             response = await brain.run(state.messages[-1].text, device="phone", session="eval")
             store().set("response", response)
         return bridge.state

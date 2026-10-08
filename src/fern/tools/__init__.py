@@ -72,8 +72,13 @@ GROUPS: dict[str, str] = home.GROUPS | builder.GROUPS
 ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *home.TOOLS, *builder.TOOLS]
 
 
+_loaded_plugins: set[str] = set()
+
+
 def load_plugins(module_names: tuple[str, ...]) -> None:
-    for module_name in module_names:
+    """Idempotent: creating several Brains (tests, evals) must not register a plugin's tools twice."""
+    for module_name in set(module_names) - _loaded_plugins:
+        _loaded_plugins.add(module_name)
         plugin = importlib.import_module(module_name)
         GROUPS.update(getattr(plugin, "GROUPS", {}))
         ALL.extend(plugin.TOOLS)

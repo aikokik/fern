@@ -1,6 +1,7 @@
 """Offline tests: ScriptedModel stands in for the LLM, httpx.MockTransport for the network."""
 
 import json
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import timedelta
 
@@ -9,21 +10,33 @@ import pytest
 from agents.testing import ScriptedModel, assistant_message, function_call
 
 from fern import reader
-from fern.brain import GLOBAL, Brain, trim_history
+from fern.brain import Brain, trim_history
 from fern.config import Settings
 from fern.core import EgressBlockedError, http_client
 from fern.fakes import world
+from fern.store import GLOBAL
 
 UNLOCK_FRONT_DOOR = {"domain": "lock", "service": "unlock", "entity_id": "lock.front"}
 
 
 @pytest.fixture
-async def brain(tmp_path):
-    settings = Settings(
+async def make_brain(tmp_path):
+    """Build a Brain whose network is `handler` (default: the fake world), with optional settings overrides."""
+    base_settings = Settings(
         data_dir=tmp_path, skills_dir=Settings().skills_dir, home_url="http://ha.local:8123", home_token="t"
     )
-    async with Brain(settings) as test_brain:
-        yield test_brain
+    async with AsyncExitStack() as cleanup:
+
+        async def build(handler=world, **overrides) -> Brain:
+            brain = Brain(replace(base_settings, **overrides), httpx.MockTransport(handler))
+            return await cleanup.enter_async_context(brain)
+
+        yield build
+
+
+@pytest.fixture
+async def brain(make_brain):
+    return await make_brain()
 
 
 def script(brain: Brain, steps: list, model_alias: str = "main") -> ScriptedModel:
@@ -53,7 +66,6 @@ async def test_alarm_queues_device_command(brain):
 
 
 async def test_news_subagent_isolated_and_untrusted(brain, monkeypatch):
-    brain.http._transport = httpx.MockTransport(world)
     monkeypatch.setattr(reader, "_client", httpx.AsyncClient(transport=httpx.MockTransport(world)))
     orchestrator = script(
         brain,
@@ -83,14 +95,14 @@ async def test_news_subagent_isolated_and_untrusted(brain, monkeypatch):
     assert "<untrusted source='news_desk'>" in json.dumps(orchestrator.calls[1].input)  # subagent output = data
 
 
-async def test_deferred_group_and_risky_approval(brain):
+async def test_deferred_group_and_risky_approval(make_brain):
     home_assistant_calls = []
 
     def home_assistant(request: httpx.Request) -> httpx.Response:
         home_assistant_calls.append((request.method, request.url.path, request.headers["authorization"]))
         return httpx.Response(200, json=[])
 
-    brain.http._transport = httpx.MockTransport(home_assistant)
+    brain = await make_brain(home_assistant)
     model = script(
         brain,
         [
@@ -113,7 +125,7 @@ async def test_deferred_group_and_risky_approval(brain):
     assert brain.store.stats("s3")[0]["requests"] >= 3
 
 
-async def test_rejection_and_never_mode(brain):
+async def test_rejection_and_never_mode(brain, make_brain):
     script(
         brain,
         [
@@ -128,7 +140,7 @@ async def test_rejection_and_never_mode(brain):
     with pytest.raises(KeyError):  # single use: can't flip a rejection into an approval
         await brain.resolve(pending_id, approve=True)
 
-    never_brain = Brain(replace(brain.settings, approval="never"))
+    never_brain = await make_brain(approval="never")
     model = ScriptedModel(
         [
             [function_call("load_tools", {"group": "home"}, call_id="c1")],
@@ -141,7 +153,6 @@ async def test_rejection_and_never_mode(brain):
 
 
 async def test_domain_allowlist(brain):
-    brain.http._transport = httpx.MockTransport(lambda request: httpx.Response(200, json=[]))
     model = script(
         brain,
         [
@@ -223,16 +234,7 @@ async def test_notices_profile_voice_log(brain):
     assert '"voice": true' in brain.store.trajectories_file.read_text()
 
 
-async def test_request_change_needs_approval_then_fires_exact_spec(tmp_path):
-    settings = Settings(
-        data_dir=tmp_path,
-        skills_dir=Settings().skills_dir,
-        builder_url="https://api.anthropic.com/v1/fire",
-        builder_token="rt",
-        github_repo="me/fern",
-        github_token="gh",
-        ntfy_topic="topic123",
-    )
+async def test_request_change_needs_approval_then_fires_exact_spec(make_brain):
     sent_requests = []
 
     def outside_world(request: httpx.Request) -> httpx.Response:
@@ -259,39 +261,45 @@ async def test_request_change_needs_approval_then_fires_exact_spec(tmp_path):
             return httpx.Response(200, json={"check_runs": [{"status": "completed", "conclusion": "success"}]})
         return httpx.Response(200)
 
-    async with Brain(settings) as test_brain:
-        test_brain.http._transport = httpx.MockTransport(outside_world)
-        spec = "Add a tv plugin: media_player on/off/volume via Home Assistant, with tests."
-        test_brain.agent().model = ScriptedModel(
-            [
-                [function_call("load_tools", {"group": "builder"}, call_id="c1")],
-                [function_call("request_change", {"kind": "change", "spec": spec}, call_id="c2")],
-                [assistant_message("Claude Code is on it.")],
-            ]
-        )
-        response = await test_brain.run("tell claude code to add TV control", session="s9")
-        assert response["pending"][0]["tool"] == "request_change"
-        assert not sent_requests
-        assert spec in response["pending"][0]["args"]  # user sees the exact spec
+    test_brain = await make_brain(
+        outside_world,
+        builder_url="https://api.anthropic.com/v1/fire",
+        builder_token="rt",
+        github_repo="me/fern",
+        github_token="gh",
+        ntfy_topic="topic123",
+    )
+    spec = "Add a tv plugin: media_player on/off/volume via Home Assistant, with tests."
+    test_brain.agent().model = ScriptedModel(
+        [
+            [function_call("load_tools", {"group": "builder"}, call_id="c1")],
+            [function_call("request_change", {"kind": "change", "spec": spec}, call_id="c2")],
+            [assistant_message("Claude Code is on it.")],
+        ]
+    )
+    response = await test_brain.run("tell claude code to add TV control", session="s9")
+    assert response["pending"][0]["tool"] == "request_change"
+    assert not sent_requests
+    assert spec in response["pending"][0]["args"]  # user sees the exact spec
 
-        await test_brain.resolve(response["pending"][0]["id"], approve=True)
-        host, _path, body, headers = sent_requests[0]
-        assert host == "api.anthropic.com"
-        assert json.loads(body)["text"].endswith(spec)
-        assert headers["authorization"] == "Bearer rt"
-        assert "anthropic-beta" in headers
+    await test_brain.resolve(response["pending"][0]["id"], approve=True)
+    host, _path, body, headers = sent_requests[0]
+    assert host == "api.anthropic.com"
+    assert json.loads(body)["text"].endswith(spec)
+    assert headers["authorization"] == "Bearer rt"
+    assert "anthropic-beta" in headers
 
-        await test_brain.check_builds()
-        job = test_brain.store.get(GLOBAL, "builds")[0]
-        assert job["status"] == "ready"
-        assert job["pr"] == 7
-        _host, push_path, push_body, push_headers = next(sent for sent in sent_requests if sent[0] == "ntfy.sh")
-        assert push_path == "/topic123"
-        assert "PR #7: Add TV control (security-review)" in push_body
-        assert push_headers["click"] == "https://github.com/me/fern/pull/7"
+    await test_brain.check_builds()
+    job = test_brain.store.get(GLOBAL, "builds")[0]
+    assert job["status"] == "ready"
+    assert job["pr"] == 7
+    _host, push_path, push_body, push_headers = next(sent for sent in sent_requests if sent[0] == "ntfy.sh")
+    assert push_path == "/topic123"
+    assert "PR #7: Add TV control (security-review)" in push_body
+    assert push_headers["click"] == "https://github.com/me/fern/pull/7"
 
-        requests_before = len(sent_requests)
-        await test_brain.check_builds()  # already announced: no duplicate push
-        assert not any(sent[0] == "ntfy.sh" for sent in sent_requests[requests_before:])
-        expected_notice = "Change ready for review: PR #7: Add TV control (security-review)"
-        assert test_brain.notices_for("phone") == [expected_notice]
+    requests_before = len(sent_requests)
+    await test_brain.check_builds()  # already announced: no duplicate push
+    assert not any(sent[0] == "ntfy.sh" for sent in sent_requests[requests_before:])
+    expected_notice = "Change ready for review: PR #7: Add TV control (security-review)"
+    assert test_brain.notices_for("phone") == [expected_notice]

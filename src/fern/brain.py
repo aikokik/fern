@@ -6,8 +6,6 @@ isolated context). Use deferred tool groups for simple actions (home) so they co
 
 import asyncio
 import json
-import os
-import sqlite3
 import time
 import uuid
 from contextlib import AsyncExitStack
@@ -16,11 +14,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 from agents import (
     Agent,
     ModelSettings,
     RunConfig,
     Runner,
+    RunResult,
     RunState,
     SQLiteSession,
     ToolApprovalItem,
@@ -34,6 +34,7 @@ from fern.config import Settings
 from fern.core import FernContext, http_client, untrusted
 from fern.memory import load_memory
 from fern.notify import push
+from fern.store import GLOBAL, Store
 from fern.tools import news
 from fern.voice import speak
 
@@ -47,7 +48,6 @@ Use remember only for durable household facts the user states; use recall when p
 APPROVAL_TTL_SECONDS = 300  # how long a risky action stays approvable
 BRIEFING_MAX_AGE_SECONDS = 2 * 3600  # a cached briefing older than this is regenerated
 BRIEFING_LEAD_SECONDS = 15 * 60  # pre-generate this long before a known wake-up, so alarm-stop gets it instantly
-GLOBAL = "_"  # meta "session" for household-wide keys (alarms, briefing, builds)
 
 NEWS_INSTRUCTIONS = """You read Hacker News and brief a busy person by voice. Fetch with hn_top, then call \
 read_story for every story you need in one parallel batch. For each, say what it is actually about and why it \
@@ -82,59 +82,14 @@ def trim_history(items: list, turns_to_keep: int) -> list:
     return items
 
 
-class Store:
-    """One local SQLite file: session meta, pending approvals, usage. Trajectories go to JSONL."""
-
-    def __init__(self, settings: Settings):
-        settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(settings.db, check_same_thread=False)
-        self.trajectories_file = settings.data_dir / "trajectories.jsonl"
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS meta(session TEXT, key TEXT, value TEXT, PRIMARY KEY(session, key));
-            CREATE TABLE IF NOT EXISTS pending(
-                id TEXT PRIMARY KEY, session TEXT, device TEXT, model TEXT, state TEXT, ts REAL
-            );
-            CREATE TABLE IF NOT EXISTS usage(session TEXT, model TEXT, requests INT, input INT, cached INT, output INT);
-            CREATE TABLE IF NOT EXISTS notices(id INTEGER PRIMARY KEY, text TEXT, ts REAL);
-            CREATE TABLE IF NOT EXISTS voice(day TEXT, device TEXT, seconds REAL);
-        """)
-
-    def get(self, session: str, key: str, default: Any = None) -> Any:
-        row = self.db.execute("SELECT value FROM meta WHERE session=? AND key=?", (session, key)).fetchone()
-        return json.loads(row[0]) if row else default
-
-    def put(self, session: str, key: str, value: Any) -> None:
-        with self.db:
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?,?)", (session, key, json.dumps(value)))
-
-    def stats(self, session: str) -> list[dict]:
-        query = """SELECT model, SUM(requests), SUM(input), SUM(cached), SUM(output) FROM usage
-                   WHERE session=? GROUP BY model"""
-        return [
-            {
-                "model": model,
-                "requests": requests,
-                "input": input_tokens,
-                "cached": cached_tokens,
-                "output": output_tokens,
-                "cache_hit": round(cached_tokens / input_tokens, 2) if input_tokens else 0,
-            }
-            for model, requests, input_tokens, cached_tokens, output_tokens in self.db.execute(query, (session,))
-        ]
-
-    def log(self, record: dict) -> None:
-        file_descriptor = os.open(self.trajectories_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(file_descriptor, "a") as trajectories:
-            trajectories.write(json.dumps(record, default=str) + "\n")
-
-
 class Brain:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+        """`transport` swaps the network for tests and evals (e.g. httpx.MockTransport(fern.fakes.world))."""
         self.settings = settings
         tools.load_plugins(settings.plugins)
         self.store = Store(settings)
         self.memory = load_memory(settings.memory, settings.data_dir)
-        self.http = http_client(settings)
+        self.http = http_client(settings, transport)
         self.mcp_servers: list[MCPServerStdio] = []
         self._agents_by_model: dict[str, Agent[FernContext]] = {}
         self._exit_stack = AsyncExitStack()
@@ -159,7 +114,7 @@ class Brain:
             self.mcp_servers.append(await self._exit_stack.enter_async_context(server))
         return self
 
-    async def __aexit__(self, *exc_info) -> None:
+    async def __aexit__(self, *_exc_info) -> None:
         await self._exit_stack.aclose()
         await self.http.aclose()
 
@@ -210,14 +165,7 @@ class Brain:
         model_alias = self.store.get(session, "model", "main")
         context = self._new_context(device, session)
         context.notes += [f"Mention briefly to the user: {notice}" for notice in self.notices_for(device)]
-        result = await Runner.run(
-            self.agent(model_alias),
-            text,
-            context=context,
-            max_turns=12,
-            run_config=self.run_config,
-            session=SQLiteSession(session, self.settings.db),
-        )
+        result = await self._run_agent(model_alias, text, session, context)
         return self._finish(result, context, model_alias, text)
 
     async def resolve(self, pending_id: str, approve: bool) -> dict:
@@ -235,15 +183,22 @@ class Brain:
         )
         for interruption in state.get_interruptions():
             state.approve(interruption) if approve else state.reject(interruption)
-        result = await Runner.run(
+        result = await self._run_agent(model_alias, state, session)
+        decision = "<approved>" if approve else "<rejected>"
+        return self._finish(result, result.context_wrapper.context, model_alias, decision)
+
+    async def _run_agent(
+        self, model_alias: str, run_input: str | RunState, session: str, context: FernContext | None = None
+    ) -> RunResult:
+        """One agent run; a resumed RunState already carries its context."""
+        return await Runner.run(
             self.agent(model_alias),
-            state,
+            run_input,
+            context=context,
             max_turns=12,
             run_config=self.run_config,
             session=SQLiteSession(session, self.settings.db),
         )
-        decision = "<approved>" if approve else "<rejected>"
-        return self._finish(result, result.context_wrapper.context, model_alias, decision)
 
     async def briefing(self, device: str = "phone", refresh: bool = False) -> dict:
         """{"text", "ts"}. Cached; the lock stops alarm-stop and the scheduler from generating twice."""
@@ -311,16 +266,7 @@ class Brain:
 
         for job in active_jobs:
             if job["status"] == "running":
-                pull = next(
-                    (
-                        candidate
-                        for candidate in pull_requests
-                        if candidate["head"]["ref"].startswith("claude/")
-                        and candidate["number"] not in claimed_numbers
-                        and _to_epoch(candidate["created_at"]) >= job["ts"] - 60
-                    ),
-                    None,
-                )
+                pull = _first_new_claude_pull(pull_requests, claimed_numbers, opened_after=job["ts"] - 60)
                 if pull:
                     job.update(status="pr_open", pr=pull["number"], url=pull["html_url"], title=pull["title"])
                     claimed_numbers.add(pull["number"])
@@ -388,7 +334,7 @@ class Brain:
             }
         )
 
-    def _finish(self, result: Any, context: FernContext, model_alias: str, user_input: str) -> dict:
+    def _finish(self, result: RunResult, context: FernContext, model_alias: str, user_input: str) -> dict:
         """Persist what the run changed, record usage + trajectory, and shape the API response."""
         self.store.put(context.session, "loaded_groups", sorted(context.loaded_groups))
         new_alarms = [
@@ -412,34 +358,12 @@ class Brain:
         tools_called = [
             item["name"] for item in items if isinstance(item, dict) and item.get("type") == "function_call"
         ]
-        response: dict[str, Any] = {
-            "reply": None,
-            "commands": context.device_commands,
-            "pending": [],
-            "tools": tools_called,
-        }
-        if result.interruptions:
-            pending_id = uuid.uuid4().hex
-            saved_state = result.to_state().to_string(
-                context_serializer=lambda saved: {
-                    "loaded_groups": sorted(saved.loaded_groups),
-                    "device_commands": saved.device_commands,
-                    "notes": saved.notes,
-                }
-            )
-            with self.store.db:
-                self.store.db.execute(
-                    "INSERT INTO pending VALUES (?,?,?,?,?,?)",
-                    (pending_id, context.session, context.device, model_alias, saved_state, time.time()),
-                )
-            response["pending"] = [
-                {"id": pending_id, "tool": interruption.name, "args": interruption.arguments}
-                for interruption in result.interruptions
-            ]
-            waiting_for = [f"{interruption.name} {interruption.arguments}" for interruption in result.interruptions]
-            response["reply"] = "I need your approval: " + "; ".join(waiting_for)
+        pending = self._save_pending(result, context, model_alias) if result.interruptions else []
+        if pending:
+            reply = "I need your approval: " + "; ".join(f"{action['tool']} {action['args']}" for action in pending)
         else:
-            response["reply"] = str(result.final_output)
+            reply = str(result.final_output)
+        response = {"reply": reply, "commands": context.device_commands, "pending": pending, "tools": tools_called}
 
         self.store.log(
             {
@@ -455,6 +379,35 @@ class Brain:
             }
         )
         return response
+
+    def _save_pending(self, result: RunResult, context: FernContext, model_alias: str) -> list[dict]:
+        """Paused for approval: persist the whole run so it can resume later, even after a restart."""
+        pending_id = uuid.uuid4().hex
+        saved_state = result.to_state().to_string(
+            context_serializer=lambda saved: {
+                "loaded_groups": sorted(saved.loaded_groups),
+                "device_commands": saved.device_commands,
+                "notes": saved.notes,
+            }
+        )
+        with self.store.db:
+            self.store.db.execute(
+                "INSERT INTO pending VALUES (?,?,?,?,?,?)",
+                (pending_id, context.session, context.device, model_alias, saved_state, time.time()),
+            )
+        return [
+            {"id": pending_id, "tool": interruption.name, "args": interruption.arguments}
+            for interruption in result.interruptions
+        ]
+
+
+def _first_new_claude_pull(pull_requests: list[dict], claimed_numbers: set, opened_after: float) -> dict | None:
+    """Oldest claude/* PR not yet linked to a job and opened after the job started."""
+    for pull in pull_requests:
+        is_claude_branch = pull["head"]["ref"].startswith("claude/")
+        if is_claude_branch and pull["number"] not in claimed_numbers and _to_epoch(pull["created_at"]) >= opened_after:
+            return pull
+    return None
 
 
 def _to_epoch(iso_timestamp: str) -> float:

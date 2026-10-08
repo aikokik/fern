@@ -11,6 +11,7 @@ from agents import RunContextWrapper, function_tool
 
 from fern.config import Settings
 from fern.memory import Memory
+from fern.store import Store
 
 
 class Tier(StrEnum):
@@ -26,7 +27,7 @@ class FernContext:
     settings: Settings
     memory: Memory
     http: httpx.AsyncClient
-    store: Any = None  # fern.brain.Store (typed loosely to avoid an import cycle)
+    store: Store | None = None
     device: str = "cli"
     session: str = "default"
     loaded_groups: set[str] = field(default_factory=set)  # deferred tool groups loaded this run
@@ -38,7 +39,7 @@ class EgressBlockedError(Exception):
     pass
 
 
-def http_client(settings: Settings) -> httpx.AsyncClient:
+def http_client(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
     extra_hosts = {httpx.URL(url).host for url in (settings.home_url, settings.reader_url) if url}
     allowed_hosts = set(settings.allowed_hosts) | extra_hosts
 
@@ -46,7 +47,9 @@ def http_client(settings: Settings) -> httpx.AsyncClient:
         if request.url.host not in allowed_hosts:
             raise EgressBlockedError(f"egress to {request.url.host} not allowed")
 
-    return httpx.AsyncClient(timeout=10, follow_redirects=False, event_hooks={"request": [block_unlisted_hosts]})
+    return httpx.AsyncClient(
+        timeout=10, follow_redirects=False, event_hooks={"request": [block_unlisted_hosts]}, transport=transport
+    )
 
 
 def untrusted(source: str, text: str) -> str:
