@@ -1,5 +1,7 @@
 """The only way fern_web talks to the brain: its HTTP API, with the caller's own device token."""
 
+from typing import Any
+
 import httpx
 
 
@@ -13,7 +15,7 @@ class BrainClient:
     def __init__(self, url: str, transport: httpx.AsyncBaseTransport | None = None):
         self.http = httpx.AsyncClient(base_url=url, timeout=120, transport=transport)
 
-    async def _call(self, token: str, method: str, path: str, json: dict | None = None):
+    async def _call(self, token: str, method: str, path: str, json: dict | None = None) -> Any:
         response = await self.http.request(method, path, json=json, headers={"Authorization": f"Bearer {token}"})
         if response.status_code >= 400:
             raise BrainError(response.status_code)

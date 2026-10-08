@@ -31,9 +31,10 @@ FORGET_SESSION_AFTER_SECONDS = 60
 
 
 class AppState:
+    brain: BrainClient  # created in lifespan (needs the event loop / API key)
+    openai: AsyncOpenAI
+
     def __init__(self):
-        self.brain: BrainClient | None = None
-        self.openai: AsyncOpenAI | None = None
         self.voice_sessions: dict[str, tuple[str, VoiceSession]] = {}  # session id -> (device token hash, session)
 
 

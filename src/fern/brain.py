@@ -24,9 +24,10 @@ from agents import (
     RunState,
     SQLiteSession,
     ToolApprovalItem,
+    ToolCallItem,
     set_tracing_disabled,
 )
-from agents.mcp import MCPServerStdio
+from agents.mcp import MCPServer, MCPServerStdio
 from agents.run_config import CallModelData, ModelInputData
 
 from fern import tools
@@ -90,7 +91,7 @@ class Brain:
         self.store = Store(settings)
         self.memory = load_memory(settings.memory, settings.data_dir)
         self.http = http_client(settings, transport)
-        self.mcp_servers: list[MCPServerStdio] = []
+        self.mcp_servers: list[MCPServer] = []  # base type: the SDK expects list[MCPServer]
         self._agents_by_model: dict[str, Agent[FernContext]] = {}
         self._exit_stack = AsyncExitStack()
         set_tracing_disabled(not settings.tracing)  # privacy: household transcripts don't leave the box by default
@@ -356,7 +357,9 @@ class Brain:
 
         items = [item.to_input_item() for item in result.new_items if not isinstance(item, ToolApprovalItem)]
         tools_called = [
-            item["name"] for item in items if isinstance(item, dict) and item.get("type") == "function_call"
+            name
+            for item in result.new_items
+            if isinstance(item, ToolCallItem) and (name := getattr(item.raw_item, "name", None))
         ]
         pending = self._save_pending(result, context, model_alias) if result.interruptions else []
         if pending:

@@ -18,7 +18,7 @@ Household AI. Two packages, separate containers:
   `ev`, `j`). Tool functions take `run: RunContextWrapper[FernContext]` and read state via `run.context`.
 
 ## Commands
-- Lint: `uv run ruff check . && uv run ruff format .` (CI enforces both).
+- Lint + types: `uv run ruff check . && uv run ruff format . && uv run pyright src evals tests` (CI enforces all).
 - Tests: `uv run pytest` (offline; `agents.testing.ScriptedModel` + `httpx.MockTransport`, fake world in `src/fern/fakes.py`).
 - Evals: `uv run inspect eval evals/household.py --model openai/<model>` (needs a key; don't run in CI).
 - Every change ships with tests. Every new behavior the model should exhibit also gets a case in `evals/household.jsonl`.

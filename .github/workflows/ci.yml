@@ -15,6 +15,7 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - run: uv run pyright src evals tests
       - run: uv run pytest -q
   label:
     if: github.event_name == 'pull_request'

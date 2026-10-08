@@ -5,7 +5,7 @@ from pathlib import Path
 
 from agents import RunContextWrapper
 
-from fern.core import FernContext, Tier, tool
+from fern.core import TOOL_GROUPS, FernContext, Tier, tool
 from fern.tools import builder, device, home
 
 
@@ -42,7 +42,7 @@ async def load_tools(run: RunContextWrapper[FernContext], group: str) -> str:
     if group not in GROUPS:
         return f"error: unknown group {group!r}"
     run.context.loaded_groups.add(group)
-    tool_names = ", ".join(function.name for function in ALL if function.group == group)
+    tool_names = ", ".join(function.name for function in ALL if TOOL_GROUPS.get(function.name) == group)
     run.context.notes.append(f"Tool group '{group}' loaded: {tool_names}")
     return f"loaded {group}: {tool_names}"
 

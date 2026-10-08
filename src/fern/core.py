@@ -27,12 +27,15 @@ class FernContext:
     settings: Settings
     memory: Memory
     http: httpx.AsyncClient
-    store: Store | None = None
+    store: Store
     device: str = "cli"
     session: str = "default"
     loaded_groups: set[str] = field(default_factory=set)  # deferred tool groups loaded this run
     device_commands: list[dict] = field(default_factory=list)  # device-side actions (e.g. phone alarm)
     notes: list[str] = field(default_factory=list)  # mid-conversation system notes for next model call
+
+
+TOOL_GROUPS: dict[str, str] = {}  # tool name -> deferred group, for load_tools
 
 
 class EgressBlockedError(Exception):
@@ -82,7 +85,8 @@ def tool(tier: Tier, group: str | None = None, timeout: float = 20) -> Callable[
         function = function_tool(
             run_and_truncate, needs_approval=needs_approval, is_enabled=is_visible, timeout=timeout
         )
-        function.tier, function.group = tier, group
+        if group:
+            TOOL_GROUPS[function.name] = group
         return function
 
     return decorate

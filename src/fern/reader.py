@@ -33,7 +33,7 @@ class _ArticleTextParser(HTMLParser):
         self.chunks: list[str] = []
         self.skipped_depth = self.text_depth = 0
 
-    def handle_starttag(self, tag, _attrs):
+    def handle_starttag(self, tag, attrs):  # signature fixed by HTMLParser; attrs unused
         self.skipped_depth += tag in SKIPPED_TAGS
         self.text_depth += tag in TEXT_TAGS
 

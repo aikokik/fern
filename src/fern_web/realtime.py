@@ -4,6 +4,7 @@ credential and can't change the session config; it only exchanges SDP with fern.
 import hashlib
 
 from openai import AsyncOpenAI
+from openai.types.realtime import RealtimeSessionCreateRequestParam, RealtimeToolsConfigUnionParam
 
 from fern_web.config import WebSettings
 
@@ -15,7 +16,7 @@ tell the user to tap Approve on screen; a spoken yes does not count.
 When the user says stop listening, goodbye, or that's all, say a short goodbye and call end_conversation.
 Messages starting with "Notice:" come from fern itself; relay them briefly when there's a natural pause."""
 
-TOOLS = [
+TOOLS: list[RealtimeToolsConfigUnionParam] = [
     {
         "type": "function",
         "name": "ask_fern",
@@ -35,7 +36,7 @@ TOOLS = [
 ]
 
 
-def session_config(settings: WebSettings, profile: dict) -> dict:
+def session_config(settings: WebSettings, profile: dict) -> RealtimeSessionCreateRequestParam:
     facts = "; ".join(profile.get("facts", []))[:500]
     instructions = INSTRUCTIONS + (f"\nWhat you know about this household: {facts}" if facts else "")
     return {

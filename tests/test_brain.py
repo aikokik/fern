@@ -84,7 +84,7 @@ async def test_news_subagent_isolated_and_untrusted(brain, monkeypatch):
     response = await brain.run("news?", session="s2")
     assert response["reply"] == "Two stories."
 
-    subagent_input = json.dumps(subagent.last_call.input)
+    subagent_input = json.dumps(subagent.calls[-1].input)
     assert "<untrusted source='hackernews'>" in subagent_input
     assert "[2] Story 2 (20 pts, ex2.com)" in subagent_input
     assert "<untrusted source='article'>" in subagent_input
