@@ -212,6 +212,7 @@ async def test_call_handshake_server_side(web_client):
     assert session_config["model"]
     assert {function["name"] for function in session_config["tools"]} == {"ask_fern", "end_conversation"}
     assert "Sam wakes at 7" in session_config["instructions"]  # personalization
+    assert session_config["max_output_tokens"] > 0  # spoken replies are capped
     assert "connect-src 'self';" in response.headers["content-security-policy"]
 
 

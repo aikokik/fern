@@ -12,6 +12,8 @@ class WebSettings:
     transcribe_model: str = os.getenv("FERN_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
     daily_minutes: float = float(os.getenv("FERN_VOICE_DAILY_MINUTES", "30"))
     idle_seconds: float = float(os.getenv("FERN_VOICE_IDLE_SECONDS", "120"))
+    # Caps one spoken reply. Raise it if you want long spoken briefings through the voice app.
+    max_output_tokens: int = int(os.getenv("FERN_VOICE_MAX_OUTPUT_TOKENS", "600"))
     notice_poll_seconds: float = 30
 
 

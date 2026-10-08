@@ -9,6 +9,8 @@ from openai.types.realtime import RealtimeSessionCreateRequestParam, RealtimeToo
 from fern_web.config import WebSettings
 
 INSTRUCTIONS = """You are fern, a household assistant, speaking with the user by voice.
+Be concise: one or two short sentences per turn, no filler, no repeating the question, no follow-up offers.
+When relaying ask_fern's reply, keep only what the user needs; give more detail only if they ask.
 For anything beyond small talk (questions, news, alarms, home control, memory, plans, changes to fern itself),
 call ask_fern with the user's request in their own words, then speak its reply naturally and briefly.
 Never claim you did something unless ask_fern's result says it was done. If the result says approval is needed,
@@ -43,6 +45,7 @@ def session_config(settings: WebSettings, profile: dict) -> RealtimeSessionCreat
         "type": "realtime",
         "model": settings.model,
         "instructions": instructions,
+        "max_output_tokens": settings.max_output_tokens,  # hard cap per spoken reply (audio tokens are costly)
         "tools": TOOLS,
         "audio": {
             "input": {
