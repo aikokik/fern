@@ -29,6 +29,7 @@ services:
       FERN_REALTIME_MODEL: ${FERN_REALTIME_MODEL:-gpt-realtime-2.1-mini}
       FERN_REALTIME_VOICE: ${FERN_REALTIME_VOICE:-marin}
       FERN_VOICE_DAILY_MINUTES: ${FERN_VOICE_DAILY_MINUTES:-30}
+      FERN_VOICE_MAX_OUTPUT_TOKENS: ${FERN_VOICE_MAX_OUTPUT_TOKENS:-600}
       HTTPS_PROXY: http://egress:8888
       NO_PROXY: brain
     networks: [sealed]
