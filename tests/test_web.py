@@ -94,6 +94,12 @@ def voice_session(connection: FakeRealtimeConnection, recorded_calls: list) -> V
     )
 
 
+def response_done(status: str, arguments: str, call_id: str = "c1") -> SimpleNamespace:
+    """A Realtime `response.done` event whose output is one ask_fern call."""
+    call = SimpleNamespace(type="function_call", name="ask_fern", call_id=call_id, arguments=arguments)
+    return SimpleNamespace(type="response.done", response=SimpleNamespace(status=status, output=[call]))
+
+
 async def wait_until(condition, timeout_seconds=2.0):
     for _attempt in range(int(timeout_seconds / 0.01)):
         if condition():
@@ -109,14 +115,7 @@ async def test_tool_call_runs_on_server_channel():
     await connection.incoming.put(
         SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="unlock the door")
     )
-    await connection.incoming.put(
-        SimpleNamespace(
-            type="response.function_call_arguments.done",
-            name="ask_fern",
-            call_id="c1",
-            arguments='{"request": "unlock the door"}',
-        )
-    )
+    await connection.incoming.put(response_done("completed", '{"request": "unlock the door"}'))
     await wait_until(lambda: len(connection.sent) >= 2)
 
     tool_output = connection.sent[0]["item"]
@@ -134,6 +133,23 @@ async def test_tool_call_runs_on_server_channel():
     assert (await session.browser_events.get()) == {"type": "end"}
     voice_log = next(call for call in recorded_calls if call[1] == "/v1/voice-log")[2]
     assert voice_log["transcript"] == [{"role": "user", "text": "unlock the door"}]
+
+
+async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain():
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    run_task = asyncio.create_task(session.run())
+    # User talked over the model: the response was cancelled with a half-written call.
+    await connection.incoming.put(response_done("cancelled", '{"request": "ask Claude Code to pla', call_id="c1"))
+    # A completed response with broken JSON: tell the model to ask again instead of failing.
+    await connection.incoming.put(response_done("completed", '{"request": "ask Cl', call_id="c2"))
+    await wait_until(lambda: len(connection.sent) >= 2)
+
+    assert connection.sent[0]["item"]["call_id"] == "c2"
+    assert "repeat" in connection.sent[0]["item"]["output"]
+    assert not any(call[1] == "/v1/chat" for call in recorded_calls)
+    await session.close()
+    await run_task
 
 
 async def test_say_injects_system_message():

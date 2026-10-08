@@ -72,12 +72,7 @@ class VoiceSession:
 
     async def _handle_event(self, event: Any) -> None:
         event_type = event.type
-        if event_type == "response.function_call_arguments.done":
-            # Run the tool in the background so session events keep flowing meanwhile.
-            task = asyncio.create_task(self._run_tool(event.name, event.call_id, event.arguments))
-            self._tool_tasks.add(task)
-            task.add_done_callback(self._tool_tasks.discard)
-        elif event_type == "input_audio_buffer.speech_started":
+        if event_type == "input_audio_buffer.speech_started":
             self.last_activity_at = time.monotonic()
         elif event_type == "conversation.item.input_audio_transcription.completed":
             self.last_activity_at = time.monotonic()
@@ -89,8 +84,23 @@ class VoiceSession:
         elif event_type == "response.done":
             self.model_is_responding = False
             self.last_activity_at = time.monotonic()
+            self._start_tool_calls(event.response)
         elif event_type == "error":
             log.warning("realtime error in %s: %s", self.session_id, getattr(event, "error", event))
+
+    def _start_tool_calls(self, response: Any) -> None:
+        """Run tool calls only from responses that completed. When the user talks over the model, the response
+        is cancelled and any half-generated call is dropped; the model re-plans with what the user just said."""
+        function_calls = [item for item in response.output or [] if item.type == "function_call"]
+        if response.status != "completed":
+            if function_calls:
+                log.info("dropped %d tool call(s) from a %s response", len(function_calls), response.status)
+            return
+        for call in function_calls:
+            # Background task so session events keep flowing while the brain works.
+            task = asyncio.create_task(self._run_tool(call.name, call.call_id, call.arguments))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
 
     async def _run_tool(self, name: str, call_id: str, arguments: str) -> None:
         if name == "end_conversation":
@@ -104,6 +114,11 @@ class VoiceSession:
             return
         try:
             request = json.loads(arguments or "{}").get("request", "")
+        except json.JSONDecodeError:
+            log.warning("ask_fern got malformed arguments: %.80r", arguments)
+            await self._send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
+            return
+        try:
             brain_response = await self.brain.chat(self.device_token, request)
         except Exception as error:
             log.exception("ask_fern failed")
