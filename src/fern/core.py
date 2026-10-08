@@ -33,6 +33,7 @@ class FernContext:
     loaded_groups: set[str] = field(default_factory=set)  # deferred tool groups loaded this run
     device_commands: list[dict] = field(default_factory=list)  # device-side actions (e.g. phone alarm)
     notes: list[str] = field(default_factory=list)  # mid-conversation system notes for next model call
+    subagent_runs: list[dict] = field(default_factory=list)  # full subagent trajectories, logged with the parent
 
 
 TOOL_GROUPS: dict[str, str] = {}  # tool name -> deferred group, for load_tools
