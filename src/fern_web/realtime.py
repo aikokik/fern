@@ -17,7 +17,8 @@ Messages starting with "Notice:" come from fern itself; relay them briefly when 
 
 TOOLS = [
     {
-        "type": "function", "name": "ask_fern",
+        "type": "function",
+        "name": "ask_fern",
         "description": "Send the user's request to fern's brain (tools, memory, news, alarms, home, approvals).",
         "parameters": {
             "type": "object",
@@ -26,36 +27,40 @@ TOOLS = [
         },
     },
     {
-        "type": "function", "name": "end_conversation",
+        "type": "function",
+        "name": "end_conversation",
         "description": "End the voice session when the user is done.",
         "parameters": {"type": "object", "properties": {}},
     },
 ]
 
 
-def session_config(s: WebSettings, profile: dict) -> dict:
+def session_config(settings: WebSettings, profile: dict) -> dict:
     facts = "; ".join(profile.get("facts", []))[:500]
     instructions = INSTRUCTIONS + (f"\nWhat you know about this household: {facts}" if facts else "")
     return {
         "type": "realtime",
-        "model": s.model,
+        "model": settings.model,
         "instructions": instructions,
         "tools": TOOLS,
         "audio": {
             "input": {
-                "transcription": {"model": s.transcribe_model},
+                "transcription": {"model": settings.transcribe_model},
                 "turn_detection": {"type": "semantic_vad", "eagerness": "auto"},
                 "noise_reduction": {"type": "near_field"},
             },
-            "output": {"voice": s.voice},
+            "output": {"voice": settings.voice},
         },
     }
 
 
-async def start_call(client: AsyncOpenAI, s: WebSettings, profile: dict, offer_sdp: str) -> tuple[str, str]:
+async def start_call(client: AsyncOpenAI, settings: WebSettings, profile: dict, offer_sdp: str) -> tuple[str, str]:
     """Browser SDP offer -> (SDP answer, call_id). The call_id stays server-side for the sideband."""
-    safety_id = hashlib.sha256(profile["device"].encode()).hexdigest()[:32]
-    raw = await client.realtime.calls.with_raw_response.create(
-        sdp=offer_sdp, session=session_config(s, profile), extra_headers={"OpenAI-Safety-Identifier": safety_id},
+    safety_identifier = hashlib.sha256(profile["device"].encode()).hexdigest()[:32]
+    raw_response = await client.realtime.calls.with_raw_response.create(
+        sdp=offer_sdp,
+        session=session_config(settings, profile),
+        extra_headers={"OpenAI-Safety-Identifier": safety_identifier},
     )
-    return raw.http_response.text, raw.headers["location"].rsplit("/", 1)[-1]
+    call_id = raw_response.headers["location"].rsplit("/", 1)[-1]
+    return raw_response.http_response.text, call_id

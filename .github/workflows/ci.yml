@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run pytest -q
   label:
     if: github.event_name == 'pull_request'

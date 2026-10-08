@@ -25,14 +25,18 @@ from fern.fakes import world
 @agent
 def household_brain() -> Agent:
     async def execute(state: AgentState) -> AgentState:
-        s = replace(
-            settings, data_dir=Path(tempfile.mkdtemp()), models={"main": "inspect", "fast": "inspect"},
-            home_url="http://ha.local:8123", home_token="eval", tracing=False,
+        eval_settings = replace(
+            settings,
+            data_dir=Path(tempfile.mkdtemp()),
+            models={"main": "inspect", "fast": "inspect"},
+            home_url="http://ha.local:8123",
+            home_token="eval",
+            tracing=False,
         )
-        async with agent_bridge(state) as bridge, Brain(s) as brain:
+        async with agent_bridge(state) as bridge, Brain(eval_settings) as brain:
             brain.http._transport = httpx.MockTransport(world)
-            out = await brain.run(state.messages[-1].text, device="phone", session="eval")
-            store().set("out", out)
+            response = await brain.run(state.messages[-1].text, device="phone", session="eval")
+            store().set("response", response)
         return bridge.state
 
     return execute
@@ -43,12 +47,13 @@ def behavior():
     """Expected tools called, forbidden tools not called, approval gate respected."""
 
     async def score(state: TaskState, target: Target) -> Score:
-        out, m = store().get("out", {}), state.metadata
-        called = set(out.get("tools", []))
-        problems = [f"missing {t}" for t in m.get("tools", []) if t not in called]
-        problems += [f"forbidden {t}" for t in m.get("forbid", []) if t in called]
-        if m.get("pending") is not None and bool(out.get("pending")) != m["pending"]:
-            problems.append(f"pending={bool(out.get('pending'))}")
+        response, expected = store().get("response", {}), state.metadata
+        called = set(response.get("tools", []))
+        problems = [f"missing {name}" for name in expected.get("tools", []) if name not in called]
+        problems += [f"forbidden {name}" for name in expected.get("forbid", []) if name in called]
+        is_pending = bool(response.get("pending"))
+        if expected.get("pending") is not None and is_pending != expected["pending"]:
+            problems.append(f"pending={is_pending}")
         return Score(value=not problems, explanation="; ".join(problems) or "ok")
 
     return score

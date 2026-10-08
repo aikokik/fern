@@ -4,132 +4,173 @@ The browser carries audio only. Tool calls, approvals, live notices, idle/cost l
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from typing import Any, AsyncContextManager, Callable
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+from typing import Any
 
 from fern_web.brain_client import BrainClient
 
 log = logging.getLogger("fern_web")
+GOODBYE_SECONDS = 4  # let the spoken goodbye finish before hanging up
 
 
 class VoiceSession:
     def __init__(
-        self, sid: str, token: str, call_id: str, brain: BrainClient,
-        connect: Callable[[str], AsyncContextManager[Any]], hangup: Callable[[str], Any],
-        max_seconds: float, idle_seconds: float, notice_poll: float,
+        self,
+        session_id: str,
+        device_token: str,
+        call_id: str,
+        brain: BrainClient,
+        connect: Callable[[str], AbstractAsyncContextManager[Any]],
+        hangup: Callable[[str], Any],
+        max_seconds: float,
+        idle_seconds: float,
+        notice_poll_seconds: float,
     ):
-        self.sid, self.token, self.call_id, self.brain = sid, token, call_id, brain
-        self._connect, self._hangup = connect, hangup
-        self.max_seconds, self.idle_seconds, self.notice_poll = max_seconds, idle_seconds, notice_poll
-        self.events: asyncio.Queue[dict] = asyncio.Queue()  # -> browser (SSE)
+        self.session_id = session_id
+        self.device_token = device_token
+        self.call_id = call_id
+        self.brain = brain
+        self._connect = connect
+        self._hangup = hangup
+        self.max_seconds = max_seconds
+        self.idle_seconds = idle_seconds
+        self.notice_poll_seconds = notice_poll_seconds
+        self.browser_events: asyncio.Queue[dict] = asyncio.Queue()  # streamed to the browser (SSE)
         self.transcript: list[dict] = []
-        self.started = self.last_activity = time.monotonic()
-        self.responding = False
-        self.conn: Any = None
+        self.started_at = self.last_activity_at = time.monotonic()
+        self.model_is_responding = False
+        self.connection: Any = None
         self.closed = asyncio.Event()
+        self._tool_tasks: set[asyncio.Task] = set()  # strong refs: asyncio only keeps weak ones
+        self.task: asyncio.Task | None = None  # set by whoever starts run()
 
     async def run(self) -> None:
-        tasks: list[asyncio.Task] = []
+        background_tasks: list[asyncio.Task] = []
         try:
-            async with self._connect(self.call_id) as conn:
-                self.conn = conn
-                tasks = [asyncio.create_task(self._watchdog()), asyncio.create_task(self._notices())]
-                async for ev in conn:
-                    await self._on(ev)
+            async with self._connect(self.call_id) as connection:
+                self.connection = connection
+                background_tasks = [
+                    asyncio.create_task(self._enforce_limits()),
+                    asyncio.create_task(self._relay_notices()),
+                ]
+                async for event in connection:
+                    await self._handle_event(event)
                     if self.closed.is_set():
                         break
         except Exception:
             if not self.closed.is_set():  # a closed socket after our own hangup is expected
-                log.exception("voice session %s failed", self.sid)
+                log.exception("voice session %s failed", self.session_id)
         finally:
-            for t in tasks:
-                t.cancel()
+            for task in background_tasks:
+                task.cancel()
             await self._finish()
 
-    async def _on(self, ev: Any) -> None:
-        t = ev.type
-        if t == "response.function_call_arguments.done":
-            asyncio.create_task(self._tool(ev.name, ev.call_id, ev.arguments))  # keep events flowing meanwhile
-        elif t == "input_audio_buffer.speech_started":
-            self.last_activity = time.monotonic()
-        elif t == "conversation.item.input_audio_transcription.completed":
-            self.last_activity = time.monotonic()
-            self.transcript.append({"role": "user", "text": ev.transcript})
-        elif t == "response.output_audio_transcript.done":
-            self.transcript.append({"role": "assistant", "text": ev.transcript})
-        elif t == "response.created":
-            self.responding = True
-        elif t == "response.done":
-            self.responding = False
-            self.last_activity = time.monotonic()
-        elif t == "error":
-            log.warning("realtime error in %s: %s", self.sid, getattr(ev, "error", ev))
+    async def _handle_event(self, event: Any) -> None:
+        event_type = event.type
+        if event_type == "response.function_call_arguments.done":
+            # Run the tool in the background so session events keep flowing meanwhile.
+            task = asyncio.create_task(self._run_tool(event.name, event.call_id, event.arguments))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
+        elif event_type == "input_audio_buffer.speech_started":
+            self.last_activity_at = time.monotonic()
+        elif event_type == "conversation.item.input_audio_transcription.completed":
+            self.last_activity_at = time.monotonic()
+            self.transcript.append({"role": "user", "text": event.transcript})
+        elif event_type == "response.output_audio_transcript.done":
+            self.transcript.append({"role": "assistant", "text": event.transcript})
+        elif event_type == "response.created":
+            self.model_is_responding = True
+        elif event_type == "response.done":
+            self.model_is_responding = False
+            self.last_activity_at = time.monotonic()
+        elif event_type == "error":
+            log.warning("realtime error in %s: %s", self.session_id, getattr(event, "error", event))
 
-    async def _tool(self, name: str, call_id: str, arguments: str) -> None:
+    async def _run_tool(self, name: str, call_id: str, arguments: str) -> None:
         if name == "end_conversation":
-            await self._output(call_id, "ok")
-            await asyncio.sleep(4)  # let the goodbye play
+            await self._send_tool_output(call_id, "ok")
+            await asyncio.sleep(GOODBYE_SECONDS)
             self.closed.set()
             await self.close()
             return
         if name != "ask_fern":
-            await self._output(call_id, f"unknown tool {name}")
+            await self._send_tool_output(call_id, f"unknown tool {name}")
             return
         try:
             request = json.loads(arguments or "{}").get("request", "")
-            out = await self.brain.chat(self.token, request)
-        except Exception as e:
+            brain_response = await self.brain.chat(self.device_token, request)
+        except Exception as error:
             log.exception("ask_fern failed")
-            await self._output(call_id, f"fern is unavailable right now ({type(e).__name__}).")
+            await self._send_tool_output(call_id, f"fern is unavailable right now ({type(error).__name__}).")
             return
-        await self.publish(out)
-        reply = out.get("reply") or ""
-        if out.get("pending"):
+        await self.publish(brain_response)
+        reply = brain_response.get("reply") or ""
+        if brain_response.get("pending"):
             reply += " (Waiting for the user to tap Approve or Reject on screen.)"
-        await self._output(call_id, reply)
+        await self._send_tool_output(call_id, reply)
 
-    async def publish(self, out: dict) -> None:
+    async def publish(self, brain_response: dict) -> None:
         """Brain side effects the browser must act on: device commands and approval cards."""
-        for c in out.get("commands", []):
-            await self.events.put({"type": "command", "command": c})
-        for p in out.get("pending", []):
-            await self.events.put({"type": "pending", **p})
+        for command in brain_response.get("commands", []):
+            await self.browser_events.put({"type": "command", "command": command})
+        for pending in brain_response.get("pending", []):
+            await self.browser_events.put({"type": "pending", **pending})
 
     async def say(self, text: str) -> None:
         """Inject a system message and let the model voice it, waiting for a pause first."""
-        for _ in range(50):
-            if not self.responding or self.closed.is_set():
+        for _attempt in range(50):  # up to ~10 s
+            if not self.model_is_responding or self.closed.is_set():
                 break
             await asyncio.sleep(0.2)
-        if self.conn is None or self.closed.is_set():
+        if self.connection is None or self.closed.is_set():
             return
-        await self.conn.send({"type": "conversation.item.create", "item": {
-            "type": "message", "role": "system", "content": [{"type": "input_text", "text": text}],
-        }})
-        await self.conn.send({"type": "response.create"})
+        await self.connection.send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+        )
+        await self.connection.send({"type": "response.create"})
 
-    async def _output(self, call_id: str, output: str) -> None:
-        await self.conn.send({"type": "conversation.item.create", "item": {
-            "type": "function_call_output", "call_id": call_id, "output": output,
-        }})
-        await self.conn.send({"type": "response.create"})
+    async def _send_tool_output(self, call_id: str, output: str) -> None:
+        await self.connection.send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                },
+            }
+        )
+        await self.connection.send({"type": "response.create"})
 
-    async def _watchdog(self) -> None:
+    async def _enforce_limits(self) -> None:
         while not self.closed.is_set():
             await asyncio.sleep(1)
             now = time.monotonic()
-            if now - self.started > self.max_seconds or now - self.last_activity > self.idle_seconds:
+            over_budget = now - self.started_at > self.max_seconds
+            idle_too_long = now - self.last_activity_at > self.idle_seconds
+            if over_budget or idle_too_long:
                 self.closed.set()
                 await self.close()
 
-    async def _notices(self) -> None:
+    async def _relay_notices(self) -> None:
         while not self.closed.is_set():
-            await asyncio.sleep(self.notice_poll)
+            await asyncio.sleep(self.notice_poll_seconds)
             try:
-                for n in await self.brain.notices(self.token):
-                    await self.say(f"Notice: {n}")
+                for notice in await self.brain.notices(self.device_token):
+                    await self.say(f"Notice: {notice}")
             except Exception:
                 log.warning("notice poll failed", exc_info=True)
 
@@ -138,16 +179,15 @@ class VoiceSession:
             await self._hangup(self.call_id)
         except Exception:
             log.debug("hangup failed", exc_info=True)
-        if self.conn is not None:
-            try:
-                await self.conn.close()
-            except Exception:
-                log.debug("close failed", exc_info=True)
+        if self.connection is not None:
+            with contextlib.suppress(Exception):
+                await self.connection.close()
 
     async def _finish(self) -> None:
         self.closed.set()
-        await self.events.put({"type": "end"})
+        await self.browser_events.put({"type": "end"})
         try:
-            await self.brain.voice_log(self.token, time.monotonic() - self.started, self.transcript)
+            duration = time.monotonic() - self.started_at
+            await self.brain.voice_log(self.device_token, duration, self.transcript)
         except Exception:
             log.warning("voice log failed", exc_info=True)

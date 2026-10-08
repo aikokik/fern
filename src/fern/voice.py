@@ -7,8 +7,8 @@ from fern.config import Settings
 TONE = "Warm, calm morning-radio host. Natural pace, light pauses between stories."
 
 
-async def speak(s: Settings, text: str) -> bytes:
-    r = await AsyncOpenAI().audio.speech.create(
-        model=s.tts_model, voice=s.tts_voice, input=text, instructions=TONE, response_format="mp3"
+async def speak(settings: Settings, text: str) -> bytes:
+    speech = await AsyncOpenAI().audio.speech.create(
+        model=settings.tts_model, voice=settings.tts_voice, input=text, instructions=TONE, response_format="mp3"
     )
-    return r.content
+    return speech.content

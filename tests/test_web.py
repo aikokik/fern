@@ -3,7 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from types import SimpleNamespace as NS
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,156 +12,210 @@ from fern_web import app as web
 from fern_web.brain_client import BrainClient
 from fern_web.sideband import VoiceSession
 
-TOKEN = "t" * 32
+DEVICE_TOKEN = "t" * 32
+AUTHORIZED = {"Authorization": f"Bearer {DEVICE_TOKEN}"}
+OFFER = {"sdp": "v=0 offer-sdp"}
 
 
-def brain_transport(calls: list, voice_seconds: float = 0):
-    def handle(req: httpx.Request) -> httpx.Response:
-        calls.append((req.method, req.url.path, json.loads(req.content or b"null")))
-        if req.headers["authorization"] != f"Bearer {TOKEN}":
+def fake_brain(recorded_calls: list, voice_seconds_today: float = 0) -> httpx.MockTransport:
+    def handle(request: httpx.Request) -> httpx.Response:
+        recorded_calls.append((request.method, request.url.path, json.loads(request.content or b"null")))
+        if request.headers["authorization"] != f"Bearer {DEVICE_TOKEN}":
             return httpx.Response(401)
-        match req.url.path:
+        match request.url.path:
             case "/v1/profile":
-                return httpx.Response(200, json={"device": "phone", "facts": ["Sam wakes at 7"],
-                                                 "voice_seconds_today": voice_seconds})
+                return httpx.Response(
+                    200,
+                    json={
+                        "device": "phone",
+                        "facts": ["Sam wakes at 7"],
+                        "voice_seconds_today": voice_seconds_today,
+                    },
+                )
             case "/v1/chat":
-                return httpx.Response(200, json={
-                    "reply": "Need approval", "tools": ["home_secure"],
-                    "commands": [{"type": "alarm.set", "time": "07:00", "label": ""}],
-                    "pending": [{"id": "a" * 32, "tool": "home_secure", "args": "{}"}],
-                })
+                return httpx.Response(
+                    200,
+                    json={
+                        "reply": "Need approval",
+                        "tools": ["home_secure"],
+                        "commands": [{"type": "alarm.set", "time": "07:00", "label": ""}],
+                        "pending": [{"id": "a" * 32, "tool": "home_secure", "args": "{}"}],
+                    },
+                )
             case "/v1/notices":
                 return httpx.Response(200, json=[])
             case "/v1/voice-log":
                 return httpx.Response(204)
         return httpx.Response(404)
+
     return httpx.MockTransport(handle)
 
 
-class FakeConn:
+class FakeRealtimeConnection:
+    """Events put on `incoming` are what OpenAI would send; `sent` records what fern sends back."""
+
     def __init__(self):
-        self.q: asyncio.Queue = asyncio.Queue()
+        self.incoming: asyncio.Queue = asyncio.Queue()
         self.sent: list[dict] = []
 
-    async def send(self, ev):
-        self.sent.append(ev)
+    async def send(self, event):
+        self.sent.append(event)
 
     async def close(self):
-        await self.q.put(None)
+        await self.incoming.put(None)
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
-        if (ev := await self.q.get()) is None:
+        if (event := await self.incoming.get()) is None:
             raise StopAsyncIteration
-        return ev
+        return event
 
 
-def session(conn: FakeConn, calls: list, **kw) -> VoiceSession:
+def voice_session(connection: FakeRealtimeConnection, recorded_calls: list) -> VoiceSession:
     @asynccontextmanager
-    async def connect(_cid):
-        yield conn
+    async def connect(_call_id):
+        yield connection
 
-    async def hangup(_cid):
+    async def hangup(_call_id):
         pass
 
-    return VoiceSession("sid", TOKEN, "rtc_1", BrainClient("http://brain", brain_transport(calls)),
-                        connect, hangup, max_seconds=600, idle_seconds=600, notice_poll=600, **kw)
+    return VoiceSession(
+        "session-1",
+        DEVICE_TOKEN,
+        "rtc_1",
+        BrainClient("http://brain", fake_brain(recorded_calls)),
+        connect,
+        hangup,
+        max_seconds=600,
+        idle_seconds=600,
+        notice_poll_seconds=600,
+    )
 
 
-async def until(cond, timeout=2.0):
-    for _ in range(int(timeout / 0.01)):
-        if cond():
+async def wait_until(condition, timeout_seconds=2.0):
+    for _attempt in range(int(timeout_seconds / 0.01)):
+        if condition():
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition not met")
 
 
 async def test_tool_call_runs_on_server_channel():
-    conn, calls = FakeConn(), []
-    vs = session(conn, calls)
-    task = asyncio.create_task(vs.run())
-    await conn.q.put(NS(type="conversation.item.input_audio_transcription.completed", transcript="unlock the door"))
-    await conn.q.put(NS(type="response.function_call_arguments.done", name="ask_fern", call_id="c1",
-                        arguments='{"request": "unlock the door"}'))
-    await until(lambda: len(conn.sent) >= 2)
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    run_task = asyncio.create_task(session.run())
+    await connection.incoming.put(
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="unlock the door")
+    )
+    await connection.incoming.put(
+        SimpleNamespace(
+            type="response.function_call_arguments.done",
+            name="ask_fern",
+            call_id="c1",
+            arguments='{"request": "unlock the door"}',
+        )
+    )
+    await wait_until(lambda: len(connection.sent) >= 2)
 
-    out = conn.sent[0]["item"]
-    assert out["type"] == "function_call_output" and out["call_id"] == "c1"
-    assert "tap Approve" in out["output"]  # spoken yes can't approve
-    assert conn.sent[1] == {"type": "response.create"}
-    assert ("POST", "/v1/chat", {"text": "unlock the door", "session": "voice"}) in calls
-    assert await vs.events.get() == {"type": "command", "command": {"type": "alarm.set", "time": "07:00", "label": ""}}
-    assert (await vs.events.get())["type"] == "pending"
+    tool_output = connection.sent[0]["item"]
+    assert tool_output["type"] == "function_call_output"
+    assert tool_output["call_id"] == "c1"
+    assert "tap Approve" in tool_output["output"]  # spoken yes can't approve
+    assert connection.sent[1] == {"type": "response.create"}
+    assert ("POST", "/v1/chat", {"text": "unlock the door", "session": "voice"}) in recorded_calls
+    alarm = {"type": "alarm.set", "time": "07:00", "label": ""}
+    assert await session.browser_events.get() == {"type": "command", "command": alarm}
+    assert (await session.browser_events.get())["type"] == "pending"
 
-    await vs.close()
-    await task
-    assert (await vs.events.get()) == {"type": "end"}
-    log = next(c for c in calls if c[1] == "/v1/voice-log")[2]
-    assert log["transcript"] == [{"role": "user", "text": "unlock the door"}]
+    await session.close()
+    await run_task
+    assert (await session.browser_events.get()) == {"type": "end"}
+    voice_log = next(call for call in recorded_calls if call[1] == "/v1/voice-log")[2]
+    assert voice_log["transcript"] == [{"role": "user", "text": "unlock the door"}]
 
 
 async def test_say_injects_system_message():
-    conn, calls = FakeConn(), []
-    vs = session(conn, calls)
-    task = asyncio.create_task(vs.run())
-    await until(lambda: vs.conn is not None)
-    await vs.say("Notice: build ready")
-    assert conn.sent[0]["item"]["role"] == "system" and conn.sent[0]["item"]["content"][0]["text"] == "Notice: build ready"
-    await vs.close()
-    await task
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    run_task = asyncio.create_task(session.run())
+    await wait_until(lambda: session.connection is not None)
+    await session.say("Notice: build ready")
+    injected = connection.sent[0]["item"]
+    assert injected["role"] == "system"
+    assert injected["content"][0]["text"] == "Notice: build ready"
+    await session.close()
+    await run_task
 
 
 async def test_idle_timeout_ends_session():
-    conn, calls = FakeConn(), []
-    vs = session(conn, calls)
-    vs.idle_seconds = 0.5
-    await asyncio.wait_for(vs.run(), 5)
-    assert vs.closed.is_set()
+    session = voice_session(FakeRealtimeConnection(), [])
+    session.idle_seconds = 0.5
+    await asyncio.wait_for(session.run(), 5)
+    assert session.closed.is_set()
 
 
 @pytest.fixture
-def client(monkeypatch):
-    calls, sent = [], {}
+def web_client(monkeypatch):
+    recorded_calls, handshake = [], {}
 
-    async def create(sdp, session, extra_headers):
-        sent.update(sdp=sdp, session=session)
-        return NS(http_response=NS(text="answer-sdp"), headers={"location": "/v1/realtime/calls/rtc_abc"})
+    async def create_call(sdp, session, extra_headers):
+        handshake.update(sdp=sdp, session=session)
+        return SimpleNamespace(
+            http_response=SimpleNamespace(text="answer-sdp"), headers={"location": "/v1/realtime/calls/rtc_abc"}
+        )
 
-    fake_openai = NS(realtime=NS(calls=NS(with_raw_response=NS(create=create), hangup=None), connect=None))
+    fake_openai = SimpleNamespace(
+        realtime=SimpleNamespace(
+            calls=SimpleNamespace(with_raw_response=SimpleNamespace(create=create_call), hangup=None),
+            connect=None,
+        )
+    )
     monkeypatch.setattr(web.state, "openai", fake_openai, raising=False)
-    monkeypatch.setattr(web.state, "brain", BrainClient("http://brain", brain_transport(calls)), raising=False)
-    started = []
-    monkeypatch.setattr(web.VoiceSession, "run", lambda self: started.append(self.call_id) or asyncio.sleep(0))
-    c = httpx.AsyncClient(transport=httpx.ASGITransport(app=web.app), base_url="http://fern")
-    return c, sent, started, calls
+    monkeypatch.setattr(web.state, "brain", BrainClient("http://brain", fake_brain(recorded_calls)), raising=False)
+    started_calls = []
+
+    async def record_start(session):
+        started_calls.append(session.call_id)
+
+    monkeypatch.setattr(web.VoiceSession, "run", record_start)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=web.app), base_url="http://fern")
+    return client, handshake, started_calls
 
 
-async def test_call_handshake_server_side(client):
-    c, sent, started, _ = client
-    r = await c.post("/realtime/call", json={"sdp": "v=0 offer-sdp"}, headers={"Authorization": f"Bearer {TOKEN}"})
-    assert r.status_code == 200 and r.json()["sdp"] == "answer-sdp" and "sid" in r.json()
-    assert "rtc_abc" not in r.text  # call_id never leaves the server
-    assert started == ["rtc_abc"]
-    cfg = sent["session"]
-    assert cfg["model"] and {t["name"] for t in cfg["tools"]} == {"ask_fern", "end_conversation"}
-    assert "Sam wakes at 7" in cfg["instructions"]  # personalization
-    assert "connect-src 'self';" in r.headers["content-security-policy"]
+async def test_call_handshake_server_side(web_client):
+    client, handshake, started_calls = web_client
+    response = await client.post("/realtime/call", json=OFFER, headers=AUTHORIZED)
+    assert response.status_code == 200
+    assert response.json()["sdp"] == "answer-sdp"
+    assert "session_id" in response.json()
+    assert "rtc_abc" not in response.text  # call_id never leaves the server
+    assert started_calls == ["rtc_abc"]
+    session_config = handshake["session"]
+    assert session_config["model"]
+    assert {function["name"] for function in session_config["tools"]} == {"ask_fern", "end_conversation"}
+    assert "Sam wakes at 7" in session_config["instructions"]  # personalization
+    assert "connect-src 'self';" in response.headers["content-security-policy"]
 
 
-async def test_call_rejects_bad_token_and_cap(client, monkeypatch):
-    c, _, started, _ = client
-    r = await c.post("/realtime/call", json={"sdp": "v=0 offer-sdp"}, headers={"Authorization": "Bearer wrong"})
-    assert r.status_code == 401 and not started
-    monkeypatch.setattr(web.state, "brain", BrainClient("http://brain", brain_transport([], voice_seconds=10**6)))
-    r = await c.post("/realtime/call", json={"sdp": "v=0 offer-sdp"}, headers={"Authorization": f"Bearer {TOKEN}"})
-    assert r.status_code == 429 and not started
+async def test_call_rejects_bad_token_and_cap(web_client, monkeypatch):
+    client, _handshake, started_calls = web_client
+    response = await client.post("/realtime/call", json=OFFER, headers={"Authorization": "Bearer wrong"})
+    assert response.status_code == 401
+    assert not started_calls
+
+    over_budget_brain = BrainClient("http://brain", fake_brain([], voice_seconds_today=10**6))
+    monkeypatch.setattr(web.state, "brain", over_budget_brain)
+    response = await client.post("/realtime/call", json=OFFER, headers=AUTHORIZED)
+    assert response.status_code == 429
+    assert not started_calls
 
 
-async def test_events_scoped_to_owner(client):
-    c, *_ = client
-    r = await c.post("/realtime/call", json={"sdp": "v=0 offer-sdp"}, headers={"Authorization": f"Bearer {TOKEN}"})
-    sid = r.json()["sid"]
-    r = await c.post("/realtime/end", json={"sid": sid}, headers={"Authorization": "Bearer other-device-token"})
-    assert r.status_code == 404
+async def test_events_scoped_to_owner(web_client):
+    client, *_ = web_client
+    session_id = (await client.post("/realtime/call", json=OFFER, headers=AUTHORIZED)).json()["session_id"]
+    response = await client.post(
+        "/realtime/end", json={"session_id": session_id}, headers={"Authorization": "Bearer other-device-token"}
+    )
+    assert response.status_code == 404

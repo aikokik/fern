@@ -8,8 +8,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
-def _kv(raw: str) -> dict[str, str]:
-    return dict(p.split("=", 1) for p in raw.split(",") if "=" in p)
+def _parse_pairs(raw: str) -> dict[str, str]:
+    """'phone=abc,ipad=def' -> {'phone': 'abc', 'ipad': 'def'}"""
+    return dict(pair.split("=", 1) for pair in raw.split(",") if "=" in pair)
+
+
+def _parse_list(raw: str) -> tuple[str, ...]:
+    return tuple(item for item in raw.split(",") if item)
 
 
 @dataclass(frozen=True)
@@ -28,12 +33,12 @@ class Settings:
             "FERN_ALLOWED_HOSTS", "api.openai.com,hacker-news.firebaseio.com,api.anthropic.com,api.github.com,ntfy.sh"
         ).split(",")
     )
-    device_tokens: dict[str, str] = field(default_factory=lambda: _kv(os.getenv("FERN_DEVICE_TOKENS", "")))
+    device_tokens: dict[str, str] = field(default_factory=lambda: _parse_pairs(os.getenv("FERN_DEVICE_TOKENS", "")))
     reader_url: str = os.getenv("FERN_READER_URL", "")  # set in Docker; empty = read articles in-process
     home_url: str = os.getenv("HA_URL", "")
     home_token: str = os.getenv("HA_TOKEN", "")
     memory: str = os.getenv("FERN_MEMORY", "fern.memory:SQLiteMemory")  # swap in any Memory impl
-    plugins: tuple[str, ...] = tuple(p for p in os.getenv("FERN_PLUGINS", "").split(",") if p)
+    plugins: tuple[str, ...] = _parse_list(os.getenv("FERN_PLUGINS", ""))
     tracing: bool = os.getenv("FERN_TRACING") == "1"  # opt-in upload of traces to OpenAI's dashboard
     max_history_turns: int = int(os.getenv("FERN_MAX_TURNS_KEPT", "8"))
     tool_output_chars: int = int(os.getenv("FERN_TOOL_OUTPUT_CHARS", "4000"))
@@ -44,12 +49,12 @@ class Settings:
     github_token: str = os.getenv("FERN_GITHUB_TOKEN", "")
     ntfy_server: str = os.getenv("FERN_NTFY_SERVER", "https://ntfy.sh")
     ntfy_topic: str = os.getenv("FERN_NTFY_TOPIC", "")
-    tz: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
+    timezone: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
     # Briefing voice (OpenAI TTS). Short replies are spoken on-device by the phone instead.
     tts_model: str = os.getenv("FERN_TTS_MODEL", "gpt-4o-mini-tts")
     tts_voice: str = os.getenv("FERN_TTS_VOICE", "coral")
     # Daily wake-up times (HH:MM) to pre-generate the briefing for, besides alarms set through fern.
-    briefing_at: tuple[str, ...] = tuple(t for t in os.getenv("FERN_BRIEFING_AT", "").split(",") if t)
+    briefing_at: tuple[str, ...] = _parse_list(os.getenv("FERN_BRIEFING_AT", ""))
 
     @property
     def db(self) -> Path:
@@ -59,7 +64,7 @@ class Settings:
         return self.models.get(alias, alias)
 
     def now(self) -> datetime:
-        return datetime.now(ZoneInfo(self.tz)) if self.tz else datetime.now().astimezone()
+        return datetime.now(ZoneInfo(self.timezone)) if self.timezone else datetime.now().astimezone()
 
 
 settings = Settings()

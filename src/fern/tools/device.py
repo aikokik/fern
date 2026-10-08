@@ -5,11 +5,11 @@ from datetime import datetime
 
 from agents import RunContextWrapper
 
-from fern.core import Ctx, Tier, tool
+from fern.core import FernContext, Tier, tool
 
 
 @tool(Tier.ACT)
-async def set_alarm(ctx: RunContextWrapper[Ctx], time: str, label: str = "") -> str:
+async def set_alarm(run: RunContextWrapper[FernContext], time: str, label: str = "") -> str:
     """Set an alarm on the user's current device.
 
     Args:
@@ -20,9 +20,9 @@ async def set_alarm(ctx: RunContextWrapper[Ctx], time: str, label: str = "") -> 
         datetime.strptime(time, "%H:%M")
     except ValueError:
         return "error: time must be HH:MM (24h)"
-    c = ctx.context
-    c.commands.append({"type": "alarm.set", "device": c.device, "time": time, "label": label[:60]})
-    return f"alarm set for {time} on {c.device}"
+    context = run.context
+    context.device_commands.append({"type": "alarm.set", "device": context.device, "time": time, "label": label[:60]})
+    return f"alarm set for {time} on {context.device}"
 
 
 TOOLS = [set_alarm]

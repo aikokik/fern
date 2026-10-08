@@ -11,11 +11,16 @@ from fern.config import settings
 HELP = "/model <alias>  /session  /new  /quit"
 
 
+async def ask(prompt: str) -> str:
+    """input() without blocking the event loop (MCP servers and HTTP clients keep running meanwhile)."""
+    return (await asyncio.to_thread(input, prompt)).strip()
+
+
 async def chat() -> None:
     session = f"cli-{uuid.uuid4().hex[:8]}"
     async with Brain(settings) as brain:
         print(f"fern · session {session} · {HELP}")
-        while (text := input("› ").strip()) != "/quit":
+        while (text := await ask("> ")) != "/quit":
             model = None
             if text == "/new":
                 session = f"cli-{uuid.uuid4().hex[:8]}"
@@ -28,14 +33,14 @@ async def chat() -> None:
                 model, text = text.split()[1], "(model switched; acknowledge in one word)"
             if not text:
                 continue
-            out = await brain.run(text, session=session, model=model)
-            while out["pending"]:
-                p = out["pending"][0]
-                ok = input(f"approve {p['tool']} {p['args']}? [y/N] ").lower() == "y"
-                out = await brain.resolve(p["id"], ok)
-            for c in out["commands"]:
-                print(f"  ⚙ {c}")
-            print(out["reply"])
+            response = await brain.run(text, session=session, model=model)
+            while response["pending"]:
+                pending = response["pending"][0]
+                approved = (await ask(f"approve {pending['tool']} {pending['args']}? [y/N] ")).lower() == "y"
+                response = await brain.resolve(pending["id"], approved)
+            for command in response["commands"]:
+                print(f"  ⚙ {command}")
+            print(response["reply"])
 
 
 async def briefing() -> None:
@@ -44,14 +49,14 @@ async def briefing() -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="fern")
-    p.add_argument("cmd", choices=["chat", "serve", "briefing"])
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8765)
-    a = p.parse_args()
-    if a.cmd == "serve":
+    parser = argparse.ArgumentParser(prog="fern")
+    parser.add_argument("command", choices=["chat", "serve", "briefing"])
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    arguments = parser.parse_args()
+    if arguments.command == "serve":
         import uvicorn
 
-        uvicorn.run("fern.server:app", host=a.host, port=a.port)
+        uvicorn.run("fern.server:app", host=arguments.host, port=arguments.port)
     else:
-        asyncio.run(chat() if a.cmd == "chat" else briefing())
+        asyncio.run(chat() if arguments.command == "chat" else briefing())

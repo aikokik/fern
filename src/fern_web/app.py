@@ -16,84 +16,94 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from fern_web.brain_client import BrainClient, BrainError
-from fern_web.config import web_settings as S
+from fern_web.config import web_settings
 from fern_web.realtime import start_call
 from fern_web.sideband import VoiceSession
 
-STATIC = Path(__file__).parent / "static"
-CSP = (
+STATIC_DIR = Path(__file__).parent / "static"
+CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 )
+MIN_SECONDS_TO_START = 30
+SSE_KEEPALIVE_SECONDS = 15
+FORGET_SESSION_AFTER_SECONDS = 60
 
 
-class State:
-    brain: BrainClient
-    openai: AsyncOpenAI
-    sessions: dict[str, tuple[str, VoiceSession]] = {}  # sid -> (token hash, session)
+class AppState:
+    def __init__(self):
+        self.brain: BrainClient | None = None
+        self.openai: AsyncOpenAI | None = None
+        self.voice_sessions: dict[str, tuple[str, VoiceSession]] = {}  # session id -> (device token hash, session)
 
 
-state = State()
+state = AppState()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    state.brain = BrainClient(S.brain_url)
+async def lifespan(_app: FastAPI):
+    state.brain = BrainClient(web_settings.brain_url)
     state.openai = AsyncOpenAI()
     yield
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.middleware("http")
-async def security_headers(request: Request, call_next):
-    resp = await call_next(request)
-    resp.headers.update({
-        "Content-Security-Policy": CSP, "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
-        "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
-    })
-    return resp
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.update(
+        {
+            "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
+        }
+    )
+    return response
 
 
-def bearer(authorization: str = Header("")) -> str:
+def bearer_token(authorization: str = Header("")) -> str:
     if not (token := authorization.removeprefix("Bearer ")):
         raise HTTPException(401)
     return token
 
 
-async def profile_of(token: str) -> dict:
+async def fetch_profile(device_token: str) -> dict:
+    """The brain's profile call doubles as authentication of the device token."""
     try:
-        return await state.brain.profile(token)
-    except BrainError as e:
-        raise HTTPException(401 if e.status == 401 else 502)
+        return await state.brain.profile(device_token)
+    except BrainError as error:
+        raise HTTPException(401 if error.status == 401 else 502) from error
 
 
-def remaining_seconds(profile: dict) -> float:
-    return S.daily_minutes * 60 - profile.get("voice_seconds_today", 0)
+def remaining_voice_seconds(profile: dict) -> float:
+    return web_settings.daily_minutes * 60 - profile.get("voice_seconds_today", 0)
 
 
-def owned(sid: str, token: str) -> VoiceSession:
-    entry = state.sessions.get(sid)
-    if not entry or not secrets.compare_digest(entry[0], _h(token)):
+def _hash(device_token: str) -> str:
+    return hashlib.sha256(device_token.encode()).hexdigest()
+
+
+def owned_session(session_id: str, device_token: str) -> VoiceSession:
+    """Only the device that started a voice session may watch or control it."""
+    entry = state.voice_sessions.get(session_id)
+    if not entry or not secrets.compare_digest(entry[0], _hash(device_token)):
         raise HTTPException(404)
     return entry[1]
 
 
-def _h(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/healthz")
 async def healthz() -> JSONResponse:
-    ok = await state.brain.healthy()
-    return JSONResponse({"web": True, "brain": ok}, status_code=200 if ok else 503)
+    brain_ok = await state.brain.healthy()
+    return JSONResponse({"web": True, "brain": brain_ok}, status_code=200 if brain_ok else 503)
 
 
 class Offer(BaseModel):
@@ -101,93 +111,113 @@ class Offer(BaseModel):
 
 
 @app.post("/realtime/call")
-async def call(body: Offer, token: str = Depends(bearer)) -> dict:
+async def start_voice_call(body: Offer, device_token: str = Depends(bearer_token)) -> dict:
     """WebRTC handshake via fern, then attach the server-side channel to the same call."""
-    profile = await profile_of(token)
-    if (left := remaining_seconds(profile)) < 30:
+    profile = await fetch_profile(device_token)
+    seconds_left = remaining_voice_seconds(profile)
+    if seconds_left < MIN_SECONDS_TO_START:
         raise HTTPException(429, "Daily voice limit reached")
-    answer, call_id = await start_call(state.openai, S, profile, body.sdp)
-    sid = secrets.token_urlsafe(16)
-    vs = VoiceSession(
-        sid, token, call_id, state.brain,
-        connect=lambda cid: state.openai.realtime.connect(call_id=cid),
-        hangup=lambda cid: state.openai.realtime.calls.hangup(cid),
-        max_seconds=left, idle_seconds=S.idle_seconds,
-        notice_poll=S.notice_poll_seconds,
+    answer_sdp, call_id = await start_call(state.openai, web_settings, profile, body.sdp)
+    session_id = secrets.token_urlsafe(16)
+    voice_session = VoiceSession(
+        session_id,
+        device_token,
+        call_id,
+        state.brain,
+        connect=lambda call: state.openai.realtime.connect(call_id=call),
+        hangup=lambda call: state.openai.realtime.calls.hangup(call),
+        max_seconds=seconds_left,
+        idle_seconds=web_settings.idle_seconds,
+        notice_poll_seconds=web_settings.notice_poll_seconds,
     )
-    state.sessions[sid] = (_h(token), vs)
-    task = asyncio.create_task(vs.run())
-    task.add_done_callback(lambda _: asyncio.get_running_loop().call_later(60, state.sessions.pop, sid, None))
-    return {"sdp": answer, "sid": sid, "remaining_seconds": int(left)}
+    state.voice_sessions[session_id] = (_hash(device_token), voice_session)
+
+    def forget_later(_task: asyncio.Task) -> None:
+        loop = asyncio.get_running_loop()
+        loop.call_later(FORGET_SESSION_AFTER_SECONDS, state.voice_sessions.pop, session_id, None)
+
+    voice_session.task = asyncio.create_task(voice_session.run())
+    voice_session.task.add_done_callback(forget_later)
+    return {"sdp": answer_sdp, "session_id": session_id, "remaining_seconds": int(seconds_left)}
 
 
 @app.get("/realtime/events")
-async def events(sid: str, token: str = Depends(bearer)) -> StreamingResponse:
-    vs = owned(sid, token)
+async def stream_events(session_id: str, device_token: str = Depends(bearer_token)) -> StreamingResponse:
+    voice_session = owned_session(session_id, device_token)
 
-    async def stream():
+    async def server_sent_events():
         while True:
             try:
-                ev = await asyncio.wait_for(vs.events.get(), 15)
+                event = await asyncio.wait_for(voice_session.browser_events.get(), SSE_KEEPALIVE_SECONDS)
             except TimeoutError:
                 yield ": ping\n\n"
                 continue
-            yield f"data: {json.dumps(ev)}\n\n"
-            if ev["type"] == "end":
+            yield f"data: {json.dumps(event)}\n\n"
+            if event["type"] == "end":
                 return
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+    return StreamingResponse(
+        server_sent_events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
+    )
 
 
 class Decision(BaseModel):
-    sid: str
-    id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    session_id: str
+    pending_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     approve: bool
 
 
 @app.post("/realtime/approve")
-async def approve(body: Decision, token: str = Depends(bearer)) -> dict:
-    vs = owned(body.sid, token)
+async def approve(body: Decision, device_token: str = Depends(bearer_token)) -> dict:
+    voice_session = owned_session(body.session_id, device_token)
     try:
-        out = await state.brain.approve(token, body.id, body.approve)
-    except BrainError as e:
-        if e.status != 404:
-            raise HTTPException(502)
-        await vs.say("Notice: that approval expired; ask the user to repeat the request if they still want it.")
-        raise HTTPException(404, "Approval expired")
-    await vs.publish(out)
+        brain_response = await state.brain.approve(device_token, body.pending_id, body.approve)
+    except BrainError as error:
+        if error.status != 404:
+            raise HTTPException(502) from error
+        await voice_session.say("Notice: that approval expired; ask the user to repeat the request if needed.")
+        raise HTTPException(404, "Approval expired") from error
+    await voice_session.publish(brain_response)
     verdict = "approved" if body.approve else "rejected"
-    await vs.say(f"Notice: the user {verdict} the action. Result: {out.get('reply', '')}")
-    return out
+    await voice_session.say(f"Notice: the user {verdict} the action. Result: {brain_response.get('reply', '')}")
+    return brain_response
 
 
-class End(BaseModel):
-    sid: str
+class EndCall(BaseModel):
+    session_id: str
 
 
 @app.post("/realtime/end", status_code=204)
-async def end(body: End, token: str = Depends(bearer)) -> None:
-    vs = owned(body.sid, token)
-    vs.closed.set()
-    await vs.close()
+async def end_voice_call(body: EndCall, device_token: str = Depends(bearer_token)) -> None:
+    voice_session = owned_session(body.session_id, device_token)
+    voice_session.closed.set()
+    await voice_session.close()
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
 async def brain_api(path: str, request: Request) -> Response:
     """Pass-through so Shortcuts and other clients reach the brain via the single entry point. The brain still
     authenticates every call; nothing here is trusted."""
-    headers = {k: v for k in ("authorization", "content-type") if (v := request.headers.get(k))}
-    r = await state.brain.http.request(
-        request.method, f"/v1/{path}", params=request.query_params, content=await request.body(), headers=headers,
+    forwarded_headers = {
+        name: value for name in ("authorization", "content-type") if (value := request.headers.get(name))
+    }
+    brain_response = await state.brain.http.request(
+        request.method,
+        f"/v1/{path}",
+        params=request.query_params,
+        content=await request.body(),
+        headers=forwarded_headers,
     )
-    return Response(r.content, r.status_code, media_type=r.headers.get("content-type"))
+    return Response(
+        brain_response.content, brain_response.status_code, media_type=brain_response.headers.get("content-type")
+    )
 
 
 def main() -> None:
     import uvicorn
 
-    p = argparse.ArgumentParser(prog="fern-web")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8766)
-    a = p.parse_args()
-    uvicorn.run("fern_web.app:app", host=a.host, port=a.port)
+    parser = argparse.ArgumentParser(prog="fern-web")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8766)
+    arguments = parser.parse_args()
+    uvicorn.run("fern_web.app:app", host=arguments.host, port=arguments.port)

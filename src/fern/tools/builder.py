@@ -9,14 +9,14 @@ from typing import Literal
 
 from agents import RunContextWrapper
 
-from fern.core import Ctx, Tier, tool
+from fern.core import FernContext, Tier, tool
 
 GROUPS = {"builder": "Claude Code builder: plan or implement changes to fern itself (new tools, devices, skills)."}
 FIRE_HEADERS = {"anthropic-beta": "experimental-cc-routine-2026-04-01", "anthropic-version": "2023-06-01"}
 
 
 @tool(Tier.RISKY, group="builder", timeout=30)
-async def request_change(ctx: RunContextWrapper[Ctx], kind: Literal["plan", "change"], spec: str) -> str:
+async def request_change(run: RunContextWrapper[FernContext], kind: Literal["plan", "change"], spec: str) -> str:
     """Ask Claude Code to plan or implement a change to fern itself. The user approves this exact text first.
 
     Write the spec yourself from the user's words: goal, expected behavior, constraints, how to verify. Self-contained,
@@ -26,31 +26,35 @@ async def request_change(ctx: RunContextWrapper[Ctx], kind: Literal["plan", "cha
         kind: 'plan' = a proposal document in a PR, no code. 'change' = code + tests in a PR.
         spec: The change request, 1-4000 characters.
     """
-    c = ctx.context
-    s = c.settings
-    if not (s.builder_url and s.builder_token):
+    context = run.context
+    settings = context.settings
+    if not (settings.builder_url and settings.builder_token):
         return "error: the Claude Code builder is not configured (FERN_BUILDER_URL/TOKEN)"
     spec = spec.strip()[:4000]
-    text = f"KIND: {kind.upper()}\nREQUESTED VIA: fern ({c.device})\n\n{spec}"
-    r = await c.http.post(s.builder_url, json={"text": text},
-                          headers={"Authorization": f"Bearer {s.builder_token}", **FIRE_HEADERS})
-    if r.status_code >= 400:
-        return f"error: builder refused the request ({r.status_code})"
-    url = r.json().get("claude_code_session_url", "")
-    jobs = c.store.get("_", "builds", [])
-    jobs.append({"kind": kind, "spec": spec[:300], "session_url": url, "ts": time.time(), "status": "running"})
-    c.store.put("_", "builds", jobs[-20:])
+    payload = f"KIND: {kind.upper()}\nREQUESTED VIA: fern ({context.device})\n\n{spec}"
+    response = await context.http.post(
+        settings.builder_url,
+        json={"text": payload},
+        headers={"Authorization": f"Bearer {settings.builder_token}", **FIRE_HEADERS},
+    )
+    if response.status_code >= 400:
+        return f"error: builder refused the request ({response.status_code})"
+    session_url = response.json().get("claude_code_session_url", "")
+    jobs = context.store.get("_", "builds", [])
+    jobs.append({"kind": kind, "spec": spec[:300], "session_url": session_url, "ts": time.time(), "status": "running"})
+    context.store.put("_", "builds", jobs[-20:])
     return f"Claude Code started ({kind}). I'll notify you when the pull request is ready."
 
 
 @tool(Tier.READ, group="builder")
-async def build_status(ctx: RunContextWrapper[Ctx]) -> str:
+async def build_status(run: RunContextWrapper[FernContext]) -> str:
     """Recent Claude Code requests and their pull request / CI status."""
-    jobs = ctx.context.store.get("_", "builds", [])[-5:]
-    if not jobs:
+    recent_jobs = run.context.store.get("_", "builds", [])[-5:]
+    if not recent_jobs:
         return "no builder requests yet"
     return "\n".join(
-        f"{j['kind']}: {j['spec'][:80]} -> {j['status']}" + (f" (PR #{j['pr']})" if j.get("pr") else "") for j in jobs
+        f"{job['kind']}: {job['spec'][:80]} -> {job['status']}" + (f" (PR #{job['pr']})" if job.get("pr") else "")
+        for job in recent_jobs
     )
 
 

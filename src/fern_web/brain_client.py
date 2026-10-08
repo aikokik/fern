@@ -14,10 +14,10 @@ class BrainClient:
         self.http = httpx.AsyncClient(base_url=url, timeout=120, transport=transport)
 
     async def _call(self, token: str, method: str, path: str, json: dict | None = None):
-        r = await self.http.request(method, path, json=json, headers={"Authorization": f"Bearer {token}"})
-        if r.status_code >= 400:
-            raise BrainError(r.status_code)
-        return r.json() if r.content else None
+        response = await self.http.request(method, path, json=json, headers={"Authorization": f"Bearer {token}"})
+        if response.status_code >= 400:
+            raise BrainError(response.status_code)
+        return response.json() if response.content else None
 
     async def profile(self, token: str) -> dict:  # doubles as the auth check
         return await self._call(token, "GET", "/v1/profile")

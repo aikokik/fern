@@ -1,5 +1,6 @@
 """Memory is a two-method protocol so you can swap in any paper's design via FERN_MEMORY=module:Class."""
 
+import importlib
 import sqlite3
 from pathlib import Path
 from typing import Protocol
@@ -7,7 +8,7 @@ from typing import Protocol
 
 class Memory(Protocol):
     def remember(self, text: str, kind: str = "fact") -> None: ...
-    def recall(self, query: str, k: int = 5) -> list[str]: ...
+    def recall(self, query: str, limit: int = 5) -> list[str]: ...
 
 
 class SQLiteMemory:
@@ -21,20 +22,21 @@ class SQLiteMemory:
         with self.db:
             self.db.execute("INSERT INTO mem VALUES (?, ?, datetime('now'))", (text, kind))
 
-    def recall(self, query: str, k: int = 5) -> list[str]:
-        terms = " OR ".join(f'"{w}"' for w in query.replace('"', "").split() if len(w) > 2)
-        if not terms:
+    def recall(self, query: str, limit: int = 5) -> list[str]:
+        words = [word for word in query.replace('"', "").split() if len(word) > 2]
+        if not words:
             return []
-        rows = self.db.execute("SELECT text FROM mem WHERE mem MATCH ? ORDER BY rank LIMIT ?", (terms, k))
-        return [r[0] for r in rows]
+        match_any_word = " OR ".join(f'"{word}"' for word in words)
+        rows = self.db.execute("SELECT text FROM mem WHERE mem MATCH ? ORDER BY rank LIMIT ?", (match_any_word, limit))
+        return [text for (text,) in rows]
 
-    def recent(self, k: int = 10) -> list[str]:
+    def recent(self, limit: int = 10) -> list[str]:
         """Optional extra (not in the protocol): newest facts, used for the voice profile."""
-        return [r[0] for r in self.db.execute("SELECT text FROM mem ORDER BY rowid DESC LIMIT ?", (k,))]
+        rows = self.db.execute("SELECT text FROM mem ORDER BY rowid DESC LIMIT ?", (limit,))
+        return [text for (text,) in rows]
 
 
 def load_memory(spec: str, data_dir: Path) -> Memory:
-    import importlib
-
-    mod, _, cls = spec.partition(":")
-    return getattr(importlib.import_module(mod), cls)(data_dir / "memory.db")
+    module_name, _, class_name = spec.partition(":")
+    memory_class = getattr(importlib.import_module(module_name), class_name)
+    return memory_class(data_dir / "memory.db")

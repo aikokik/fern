@@ -10,16 +10,22 @@ HA_STATES = [
 ]
 
 
-def world(req: httpx.Request) -> httpx.Response:
-    path = req.url.path
+def world(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
     if path.endswith("topstories.json"):
         return httpx.Response(200, json=list(range(1, 31)))
     if "/item/" in path:
-        i = int(path.rsplit("/", 1)[1].split(".")[0])
-        return httpx.Response(200, json={"id": i, "title": f"Story {i}", "score": 10 * i, "url": f"https://ex{i}.com/a"})
-    if req.url.host.startswith("ex") and req.url.path == "/a":
-        i = req.url.host[2:].split(".")[0]
-        html = f"<nav>menu</nav><h1>Story {i}</h1><p>Article {i} body.</p><script>x()</script>"
+        story_id = int(path.rsplit("/", 1)[1].split(".")[0])
+        story = {
+            "id": story_id,
+            "title": f"Story {story_id}",
+            "score": 10 * story_id,
+            "url": f"https://ex{story_id}.com/a",
+        }
+        return httpx.Response(200, json=story)
+    if request.url.host.startswith("ex") and path == "/a":
+        story_id = request.url.host[2:].split(".")[0]
+        html = f"<nav>menu</nav><h1>Story {story_id}</h1><p>Article {story_id} body.</p><script>x()</script>"
         return httpx.Response(200, html=html)
     if path == "/api/states":
         return httpx.Response(200, json=HA_STATES)

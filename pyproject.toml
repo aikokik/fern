@@ -31,7 +31,16 @@ dev = [
     "inspect-ai>=0.3.276",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle, imports, naming, bugbear, pyupgrade, simplify, asyncio pitfalls, ruff-specific, return/raise hygiene
+select = ["F", "E", "W", "I", "N", "B", "UP", "SIM", "ASYNC", "RUF", "RET", "RSE", "C4", "PIE", "PT"]

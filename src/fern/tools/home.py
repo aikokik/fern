@@ -3,44 +3,53 @@ Domains are allowlisted and split by tier; the HA token stays in the HTTP client
 
 from agents import RunContextWrapper
 
-from fern.core import Ctx, Tier, tool
+from fern.core import FernContext, Tier, tool
 
 GROUPS = {"home": "Home Assistant: read device states, control lights/media, locks/climate (approval)."}
 ACT_DOMAINS = {"light", "switch", "fan", "media_player", "scene"}
 RISKY_DOMAINS = {"lock", "climate", "cover", "alarm_control_panel", "water_heater", "vacuum"}
 
 
-async def _call(c: Ctx, method: str, path: str, json: dict | None = None):
-    if not c.settings.home_url:
+async def _home_assistant(context: FernContext, method: str, path: str, json: dict | None = None):
+    settings = context.settings
+    if not settings.home_url:
         raise RuntimeError("Home Assistant not configured")
-    r = await c.http.request(
-        method, f"{c.settings.home_url}/api/{path}", json=json,
-        headers={"Authorization": f"Bearer {c.settings.home_token}"},
+    response = await context.http.request(
+        method,
+        f"{settings.home_url}/api/{path}",
+        json=json,
+        headers={"Authorization": f"Bearer {settings.home_token}"},
     )
-    r.raise_for_status()
-    return r.json()
+    response.raise_for_status()
+    return response.json()
 
 
-async def _service(c: Ctx, allowed: set[str], domain: str, service: str, entity_id: str) -> str:
-    if domain not in allowed or not entity_id.startswith(f"{domain}."):
+async def _call_service(
+    context: FernContext, allowed_domains: set[str], domain: str, service: str, entity_id: str
+) -> str:
+    if domain not in allowed_domains or not entity_id.startswith(f"{domain}."):
         return f"error: {domain}.{service} on {entity_id} not allowed by this tool"
-    await _call(c, "POST", f"services/{domain}/{service}", {"entity_id": entity_id})
+    await _home_assistant(context, "POST", f"services/{domain}/{service}", {"entity_id": entity_id})
     return f"ok: {domain}.{service} {entity_id}"
 
 
 @tool(Tier.READ, group="home")
-async def home_states(ctx: RunContextWrapper[Ctx], domain: str) -> str:
+async def home_states(run: RunContextWrapper[FernContext], domain: str) -> str:
     """List entities and their states for one domain (e.g. 'light', 'lock').
 
     Args:
         domain: Home Assistant domain.
     """
-    states = await _call(ctx.context, "GET", "states")
-    return "\n".join(f"{s['entity_id']}: {s['state']}" for s in states if s["entity_id"].startswith(f"{domain}."))
+    entities = await _home_assistant(run.context, "GET", "states")
+    return "\n".join(
+        f"{entity['entity_id']}: {entity['state']}"
+        for entity in entities
+        if entity["entity_id"].startswith(f"{domain}.")
+    )
 
 
 @tool(Tier.ACT, group="home")
-async def home_control(ctx: RunContextWrapper[Ctx], domain: str, service: str, entity_id: str) -> str:
+async def home_control(run: RunContextWrapper[FernContext], domain: str, service: str, entity_id: str) -> str:
     """Control lights, switches, fans, media players, scenes.
 
     Args:
@@ -48,11 +57,11 @@ async def home_control(ctx: RunContextWrapper[Ctx], domain: str, service: str, e
         service: e.g. turn_on, turn_off, media_pause.
         entity_id: e.g. light.kitchen.
     """
-    return await _service(ctx.context, ACT_DOMAINS, domain, service, entity_id)
+    return await _call_service(run.context, ACT_DOMAINS, domain, service, entity_id)
 
 
 @tool(Tier.RISKY, group="home")
-async def home_secure(ctx: RunContextWrapper[Ctx], domain: str, service: str, entity_id: str) -> str:
+async def home_secure(run: RunContextWrapper[FernContext], domain: str, service: str, entity_id: str) -> str:
     """Control locks, climate, covers, alarm panels, water heater, vacuum. Requires human approval.
 
     Args:
@@ -60,7 +69,7 @@ async def home_secure(ctx: RunContextWrapper[Ctx], domain: str, service: str, en
         service: e.g. lock, unlock, set_temperature, open_cover.
         entity_id: e.g. lock.front_door.
     """
-    return await _service(ctx.context, RISKY_DOMAINS, domain, service, entity_id)
+    return await _call_service(run.context, RISKY_DOMAINS, domain, service, entity_id)
 
 
 TOOLS = [home_states, home_control, home_secure]

@@ -14,72 +14,83 @@ import httpx
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
-HN = "https://hacker-news.firebaseio.com/v0"
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) fern-reader/1.0"
-SKIP = {"script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg", "button"}
-KEEP = {"p", "h1", "h2", "h3", "li", "pre", "blockquote", "td"}
-LIMIT = 4000
-_cache: dict[int, tuple[float, str]] = {}
+HACKER_NEWS_API = "https://hacker-news.firebaseio.com/v0"
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) fern-reader/1.0"
+SKIPPED_TAGS = {"script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg", "button"}
+TEXT_TAGS = {"p", "h1", "h2", "h3", "li", "pre", "blockquote", "td"}
+MAX_CHARS = 4000
+CACHE_SECONDS = 600
+_cache: dict[int, tuple[float, str]] = {}  # item id -> (fetched at, text)
 _client: httpx.AsyncClient | None = None
 
 
-class _Text(HTMLParser):
+class _ArticleTextParser(HTMLParser):
+    """Collects text inside paragraph-like tags, ignoring navigation, scripts and other page chrome."""
+
     def __init__(self):
         super().__init__()
-        self.out: list[str] = []
-        self.skip = self.keep = 0
+        self.chunks: list[str] = []
+        self.skipped_depth = self.text_depth = 0
 
     def handle_starttag(self, tag, attrs):
-        self.skip += tag in SKIP
-        self.keep += tag in KEEP
+        self.skipped_depth += tag in SKIPPED_TAGS
+        self.text_depth += tag in TEXT_TAGS
 
     def handle_endtag(self, tag):
-        self.skip -= tag in SKIP and self.skip > 0
-        self.keep -= tag in KEEP and self.keep > 0
+        self.skipped_depth -= tag in SKIPPED_TAGS and self.skipped_depth > 0
+        self.text_depth -= tag in TEXT_TAGS and self.text_depth > 0
 
     def handle_data(self, data):
-        if self.keep and not self.skip and (d := data.strip()):
-            self.out.append(d)
+        if self.text_depth and not self.skipped_depth and (text := data.strip()):
+            self.chunks.append(text)
 
 
 def html_text(html: str) -> str:
-    p = _Text()
-    p.feed(html[:2_000_000])
-    return " ".join(p.out)
+    parser = _ArticleTextParser()
+    parser.feed(html[:2_000_000])
+    return " ".join(parser.chunks)
 
 
-async def _public_only(req: httpx.Request) -> None:
-    infos = await asyncio.get_running_loop().getaddrinfo(req.url.host, req.url.port or 443)
-    if any(not ipaddress.ip_address(i[4][0]).is_global for i in infos):
-        raise httpx.ConnectError(f"refusing non-public address for {req.url.host}")
+async def _public_addresses_only(request: httpx.Request) -> None:
+    resolved = await asyncio.get_running_loop().getaddrinfo(request.url.host, request.url.port or 443)
+    addresses = [address_info[4][0] for address_info in resolved]
+    if any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise httpx.ConnectError(f"refusing non-public address for {request.url.host}")
 
 
 def client() -> httpx.AsyncClient:
     global _client
     if _client is None:
         _client = httpx.AsyncClient(
-            timeout=10, follow_redirects=True, max_redirects=5, headers={"User-Agent": UA},
-            event_hooks={"request": [_public_only]}, trust_env=False,
+            timeout=10,
+            follow_redirects=True,
+            max_redirects=5,
+            headers={"User-Agent": USER_AGENT},
+            event_hooks={"request": [_public_addresses_only]},
+            trust_env=False,
         )
     return _client
 
 
 async def read(http: httpx.AsyncClient, item_id: int) -> str:
-    if (hit := _cache.get(item_id)) and time.monotonic() - hit[0] < 600:
-        return hit[1]
+    if (cached := _cache.get(item_id)) and time.monotonic() - cached[0] < CACHE_SECONDS:
+        return cached[1]
     try:
-        it = (await http.get(f"{HN}/item/{item_id}.json")).json() or {}
-        if it.get("text"):  # Ask/Show HN post body
-            text = html_text(it["text"])
-        elif url := it.get("url"):
-            r = await http.get(url)
-            kind = r.headers.get("content-type", "")
-            text = html_text(r.text) if r.is_success and "html" in kind else f"unreadable ({r.status_code} {kind})"
+        story = (await http.get(f"{HACKER_NEWS_API}/item/{item_id}.json")).json() or {}
+        if story.get("text"):  # Ask/Show HN post body
+            text = html_text(story["text"])
+        elif article_url := story.get("url"):
+            page = await http.get(article_url)
+            content_type = page.headers.get("content-type", "")
+            if page.is_success and "html" in content_type:
+                text = html_text(page.text)
+            else:
+                text = f"unreadable ({page.status_code} {content_type})"
         else:
             text = "no article"
-    except httpx.HTTPError as e:
-        text = f"unreadable ({type(e).__name__})"
-    text = text[:LIMIT] or "unreadable (no text)"
+    except httpx.HTTPError as error:
+        text = f"unreadable ({type(error).__name__})"
+    text = text[:MAX_CHARS] or "unreadable (no text)"
     _cache[item_id] = (time.monotonic(), text)
     return text
 

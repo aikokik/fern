@@ -1,9 +1,10 @@
 """Run context, tool policy (tiers, approvals, deferred groups) and egress-guarded HTTP."""
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable
+from enum import StrEnum
+from typing import Any
 
 import httpx
 from agents import RunContextWrapper, function_tool
@@ -12,14 +13,14 @@ from fern.config import Settings
 from fern.memory import Memory
 
 
-class Tier(str, Enum):
-    READ = "read"    # no side effects: runs freely
-    ACT = "act"      # reversible side effects: runs, logged; asks under "untrusted"
+class Tier(StrEnum):
+    READ = "read"  # no side effects: runs freely
+    ACT = "act"  # reversible side effects: runs, logged; asks under "untrusted"
     RISKY = "risky"  # locks, heat, purchases, messages: always needs human approval
 
 
 @dataclass
-class Ctx:
+class FernContext:
     """Per-request state shared by the orchestrator and every subagent (agents-as-tools share it)."""
 
     settings: Settings
@@ -28,23 +29,24 @@ class Ctx:
     store: Any = None  # fern.brain.Store (typed loosely to avoid an import cycle)
     device: str = "cli"
     session: str = "default"
-    loaded: set[str] = field(default_factory=set)       # deferred tool groups loaded this run
-    commands: list[dict] = field(default_factory=list)  # device-side actions (e.g. phone alarm)
-    notes: list[str] = field(default_factory=list)      # mid-conversation system notes for next model call
+    loaded_groups: set[str] = field(default_factory=set)  # deferred tool groups loaded this run
+    device_commands: list[dict] = field(default_factory=list)  # device-side actions (e.g. phone alarm)
+    notes: list[str] = field(default_factory=list)  # mid-conversation system notes for next model call
 
 
-class EgressBlocked(Exception):
+class EgressBlockedError(Exception):
     pass
 
 
-def http_client(s: Settings) -> httpx.AsyncClient:
-    allowed = set(s.allowed_hosts) | {httpx.URL(u).host for u in (s.home_url, s.reader_url) if u}
+def http_client(settings: Settings) -> httpx.AsyncClient:
+    extra_hosts = {httpx.URL(url).host for url in (settings.home_url, settings.reader_url) if url}
+    allowed_hosts = set(settings.allowed_hosts) | extra_hosts
 
-    async def guard(req: httpx.Request) -> None:
-        if req.url.host not in allowed:
-            raise EgressBlocked(f"egress to {req.url.host} not allowed")
+    async def block_unlisted_hosts(request: httpx.Request) -> None:
+        if request.url.host not in allowed_hosts:
+            raise EgressBlockedError(f"egress to {request.url.host} not allowed")
 
-    return httpx.AsyncClient(timeout=10, follow_redirects=False, event_hooks={"request": [guard]})
+    return httpx.AsyncClient(timeout=10, follow_redirects=False, event_hooks={"request": [block_unlisted_hosts]})
 
 
 def untrusted(source: str, text: str) -> str:
@@ -55,23 +57,29 @@ def untrusted(source: str, text: str) -> str:
 def tool(tier: Tier, group: str | None = None, timeout: float = 20) -> Callable[[Callable], Any]:
     """function_tool + approval policy by tier + optional deferred group + output truncation."""
 
-    def wrap(fn: Callable) -> Any:
-        @functools.wraps(fn)
-        async def run(*a, **kw):
-            out = await fn(*a, **kw)
-            limit = a[0].context.settings.tool_output_chars if a and isinstance(a[0], RunContextWrapper) else 4000
-            return out if not isinstance(out, str) or len(out) <= limit else out[:limit] + "…[truncated]"
+    def decorate(tool_function: Callable) -> Any:
+        @functools.wraps(tool_function)
+        async def run_and_truncate(*args, **kwargs):
+            output = await tool_function(*args, **kwargs)
+            has_context = args and isinstance(args[0], RunContextWrapper)
+            limit = args[0].context.settings.tool_output_chars if has_context else 4000
+            if not isinstance(output, str) or len(output) <= limit:
+                return output
+            return output[:limit] + "…[truncated]"
 
-        async def needs_approval(w: RunContextWrapper[Ctx], _args: dict, _call_id: str) -> bool:
-            return tier is Tier.RISKY or (tier is Tier.ACT and w.context.settings.approval == "untrusted")
+        async def needs_approval(run: RunContextWrapper[FernContext], _arguments: dict, _call_id: str) -> bool:
+            policy = run.context.settings.approval
+            return tier is Tier.RISKY or (tier is Tier.ACT and policy == "untrusted")
 
-        def enabled(w: RunContextWrapper[Ctx], _agent: Any) -> bool:
-            if tier is Tier.RISKY and w.context.settings.approval == "never":
+        def is_visible(run: RunContextWrapper[FernContext], _agent: Any) -> bool:
+            if tier is Tier.RISKY and run.context.settings.approval == "never":
                 return False
-            return group is None or group in w.context.loaded
+            return group is None or group in run.context.loaded_groups
 
-        t = function_tool(run, needs_approval=needs_approval, is_enabled=enabled, timeout=timeout)
-        t.tier, t.group = tier, group
-        return t
+        function = function_tool(
+            run_and_truncate, needs_approval=needs_approval, is_enabled=is_visible, timeout=timeout
+        )
+        function.tier, function.group = tier, group
+        return function
 
-    return wrap
+    return decorate
