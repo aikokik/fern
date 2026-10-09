@@ -5,7 +5,8 @@ phone/laptop ─Tailscale HTTPS─▶ ingress ─▶ web (src/fern_web: voice UI
      │ WebRTC audio ──▶ OpenAI Realtime ◀── server channel (tool calls) ──┘          │ device token
                                                                                      ▼
                                        brain (src/fern: API only, sealed net, read-only, non-root) ─▶ egress proxy (allowlist)
-                                        ├─ fern (main model): alarms, home, memory, approvals, scheduler (1 call per action)
+                                        ├─ fern (main model): alarms, memory, approvals, scheduler (1 call per action)
+                                        ├─ research (fast model): OpenAI web_search (+ file_search) only, answer marked untrusted
                                         └─ request_change (approved spec) ─▶ Claude Code Routine ─▶ PR ─▶ you merge ─▶ deployer
 ```
 

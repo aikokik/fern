@@ -8,6 +8,8 @@ from dataclasses import replace
 import httpx
 import pytest
 from agents.testing import ScriptedModel, assistant_message, function_call
+from openai.types.responses import ResponseFunctionWebSearch
+from openai.types.responses.response_function_web_search import ActionSearch
 
 from fern.brain import Brain, trim_history
 from fern.config import Settings
@@ -255,3 +257,31 @@ async def test_request_change_failure_returns_log_reference(make_brain):
     assert "check the fern logs for reference" in tool_result
     assert response["reply"] == "Something went wrong; check the logs."
     assert brain.store.get(GLOBAL, "builds", []) == []  # failed request is not tracked as a job
+
+
+async def test_research_is_isolated_logged_and_untrusted(brain, make_brain):
+    researcher_tools = {type(tool).__name__ for tool in brain.researcher.tools}
+    assert researcher_tools == {"WebSearchTool"}  # no fern actions; file_search only with a vector store
+    with_documents = await make_brain(vector_store_ids=("vs_123",))
+    assert {type(tool).__name__ for tool in with_documents.researcher.tools} == {"WebSearchTool", "FileSearchTool"}
+
+    orchestrator = script(
+        brain,
+        [
+            [function_call("research", {"input": "weather in Lisbon today"}, call_id="c1")],
+            [assistant_message("It's sunny, 18 degrees.")],
+        ],
+    )
+    web_search = ResponseFunctionWebSearch(
+        id="ws_1", status="completed", type="web_search_call", action=ActionSearch(type="search", query="Lisbon")
+    )
+    brain.researcher.model = ScriptedModel([[web_search, assistant_message("Sunny, 18°C (weather.com).")]])
+    response = await brain.run("what's the weather in Lisbon?", session="s11")
+    assert response["reply"] == "It's sunny, 18 degrees."
+    assert "<untrusted source='research'>" in json.dumps(orchestrator.calls[1].input)
+
+    record = json.loads(brain.store.trajectories_file.read_text().splitlines()[-1])
+    [research_run] = record["subagent_runs"]
+    assert research_run["agent"] == "research"
+    assert research_run["hosted_calls"] == {"web_search_call": 1}
+    assert research_run["output"] == "Sunny, 18°C (weather.com)."

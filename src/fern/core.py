@@ -43,6 +43,11 @@ class EgressBlockedError(Exception):
     pass
 
 
+def untrusted(source: str, text: str) -> str:
+    """Mark outside content (web pages, documents) as data. The rules tell the model never to obey it."""
+    return f"<untrusted source={source!r}>\n{text}\n</untrusted>"
+
+
 def http_client(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
     allowed_hosts = set(settings.allowed_hosts)
 
