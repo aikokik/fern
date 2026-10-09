@@ -102,7 +102,13 @@ class VoiceSession:
             self._add_usage(event.response)
             self._start_tool_calls(event.response)
         elif event_type == "error":
-            log.warning("realtime error in %s: %s", self.session_id, getattr(event, "error", event))
+            error = getattr(event, "error", None)  # type/code only: messages can echo conversation content
+            log.warning(
+                "realtime error in %s: %s %s",
+                self.session_id,
+                getattr(error, "type", "unknown"),
+                getattr(error, "code", ""),
+            )
 
     def _add_usage(self, response: Any) -> None:
         """Voice is the most expensive model per minute: count every response (audio + text tokens)."""
@@ -133,7 +139,7 @@ class VoiceSession:
         try:
             parsed_arguments = json.loads(arguments or "{}")
         except json.JSONDecodeError:
-            log.warning("%s got malformed arguments: %.80r", name, arguments)
+            log.warning("%s got malformed arguments (%d chars)", name, len(arguments or ""))  # not the user's words
             await self._send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
             return
         if name == "ask_fern":

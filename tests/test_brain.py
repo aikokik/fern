@@ -12,6 +12,7 @@ from agents.testing import ScriptedModel, assistant_message, function_call
 from fern.brain import Brain, trim_history
 from fern.config import Settings
 from fern.core import EgressBlockedError, http_client
+from fern.notify import push
 from fern.store import GLOBAL
 
 BUILDER = {"builder_url": "https://api.anthropic.com/v1/fire", "builder_token": "rt"}
@@ -255,3 +256,29 @@ async def test_request_change_failure_returns_log_reference(make_brain):
     assert "check the fern logs for reference" in tool_result
     assert response["reply"] == "Something went wrong; check the logs."
     assert brain.store.get(GLOBAL, "builds", []) == []  # failed request is not tracked as a job
+
+
+async def test_failure_logs_never_contain_urls_tokens_or_topics(make_brain, caplog):
+    brain = await make_brain(
+        lambda request: httpx.Response(503),
+        builder_url="https://api.anthropic.com/v1/claude_code/routines/trig_secret/fire",
+        builder_token="sk-ant-secret",
+        ntfy_topic="fern-secret-topic",
+    )
+    script(
+        brain,
+        [
+            [function_call("request_change", {"kind": "plan", "spec": "TV"}, call_id="c1")],
+            [assistant_message("It failed.")],
+        ],
+    )
+    pending_id = (await brain.run("plan TV", session="s14"))["pending"][0]["id"]
+    await brain.resolve(pending_id, approve=True)
+    await push(brain.http, brain.settings, "title", "message")
+
+    logged = caplog.text
+    assert "request_change failed" in logged
+    assert "HTTP 503" in logged
+    assert "push failed: HTTP 503" in logged
+    for secret in ("trig_secret", "sk-ant-secret", "fern-secret-topic", "https://"):
+        assert secret not in logged

@@ -12,7 +12,7 @@ from typing import Literal
 import httpx
 from agents import RunContextWrapper
 
-from fern.core import EgressBlockedError, FernContext, Tier, tool
+from fern.core import EgressBlockedError, FernContext, Tier, describe_http_error, tool
 from fern.store import GLOBAL
 
 log = logging.getLogger("fern")
@@ -45,7 +45,7 @@ async def request_change(run: RunContextWrapper[FernContext], kind: Literal["pla
         response.raise_for_status()
     except (httpx.HTTPError, EgressBlockedError) as error:
         reference = secrets.token_hex(3)
-        log.warning("request_change failed [ref %s]: %r", reference, error)
+        log.warning("request_change failed [ref %s]: %s", reference, describe_http_error(error))
         return (
             f"error: could not start Claude Code ({type(error).__name__}). Tell the user to check the fern logs "
             f"for reference {reference}."

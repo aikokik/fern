@@ -5,6 +5,7 @@ import logging
 import httpx
 
 from fern.config import Settings
+from fern.core import describe_http_error
 
 log = logging.getLogger("fern")
 
@@ -17,5 +18,5 @@ async def push(http: httpx.AsyncClient, settings: Settings, title: str, message:
         topic_url = f"{settings.ntfy_server}/{settings.ntfy_topic}"
         response = await http.post(topic_url, content=message.encode(), headers=headers)
         response.raise_for_status()
-    except httpx.HTTPError:
-        log.warning("push failed", exc_info=True)
+    except httpx.HTTPError as error:
+        log.warning("push failed: %s", describe_http_error(error))  # never the URL: it contains the topic

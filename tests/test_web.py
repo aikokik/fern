@@ -142,7 +142,7 @@ async def test_tool_call_runs_on_server_channel():
     assert voice_log["usage"] == {"model": "realtime", "requests": 1, "input": 500, "cached": 200, "output": 40}
 
 
-async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain():
+async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain(caplog):
     connection, recorded_calls = FakeRealtimeConnection(), []
     session = voice_session(connection, recorded_calls)
     run_task = asyncio.create_task(session.run())
@@ -154,6 +154,7 @@ async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain():
 
     assert connection.sent[0]["item"]["call_id"] == "c2"
     assert "repeat" in connection.sent[0]["item"]["output"]
+    assert "ask Cl" not in caplog.text  # the user's words never reach the logs
     assert not any(call[1] == "/v1/chat" for call in recorded_calls)
     await session.close()
     await run_task
