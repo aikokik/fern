@@ -8,6 +8,7 @@ Subagents: use one when a task reads a lot and returns a little; log it in FernC
 import json
 import time
 import uuid
+from collections import Counter
 from contextlib import AsyncExitStack
 from datetime import datetime
 from typing import Any
@@ -34,7 +35,7 @@ from agents.mcp import MCPServer, MCPServerStdio
 from agents.run_config import CallModelData, ModelInputData
 from openai.types.shared import Reasoning
 
-from fern import tools
+from fern import costs, tools
 from fern.config import Settings
 from fern.core import FernContext, http_client, untrusted
 from fern.memory import load_memory
@@ -284,20 +285,14 @@ class Brain:
             "voice_seconds_today": self.store.db.execute(query, (today, device)).fetchone()[0],
         }
 
-    def voice_log(self, device: str, seconds: float, transcript: list[dict], usage: dict | None = None) -> None:
-        """A finished voice session: minutes for the daily cap, the voice model's tokens, the transcript."""
+    def voice_log(self, device: str, seconds: float, transcript: list[dict], usage: list[dict] | None = None) -> None:
+        """A finished voice session: minutes for the daily cap, the voice + transcription models' tokens."""
         with self.store.db:
             today = f"{self.settings.now():%Y-%m-%d}"
             self.store.db.execute("INSERT INTO voice VALUES (?,?,?)", (today, device, seconds))
-        if usage:
-            self.store.record_usage(
-                f"{device}-voice",
-                usage.get("model", "realtime"),
-                usage.get("requests", 0),
-                usage.get("input", 0),
-                usage.get("cached", 0),
-                usage.get("output", 0),
-            )
+        for row in usage or []:
+            if row.get("kind") in ("voice", "transcription"):  # the interface may only report its own models
+                self.store.record_usage(f"{device}-voice", str(row["kind"]), str(row.get("model", "unknown")), row)
         self.store.log(
             {
                 "ts": datetime.now().isoformat(),
@@ -306,7 +301,7 @@ class Brain:
                 "voice": True,
                 "seconds": round(seconds, 1),
                 "transcript": transcript,
-                "usage": usage or {},
+                "usage": usage or [],
             }
         )
 
@@ -317,9 +312,7 @@ class Brain:
         usage = result.context_wrapper.usage
         cached_tokens = getattr(usage.input_tokens_details, "cached_tokens", 0) or 0
         model_name = self.settings.model(model_alias)
-        self.store.record_usage(
-            context.session, model_name, usage.requests, usage.input_tokens, cached_tokens, usage.output_tokens
-        )
+        self._record_usage(result, context, model_name)
 
         items = trajectory_items(result)
         tools_called = [
@@ -350,6 +343,36 @@ class Brain:
         )
         return response
 
+    def _record_usage(self, result: RunResult, context: FernContext, model_name: str) -> None:
+        """Store this run leg's usage split into brain / subagent / hosted tool rows. The SDK's usage counter is
+        shared with subagents and keeps counting across an approval pause, so subtract both."""
+        usage = result.context_wrapper.usage
+        totals = {
+            "requests": usage.requests,
+            "input": usage.input_tokens,
+            "cached": getattr(usage.input_tokens_details, "cached_tokens", 0) or 0,
+            "output": usage.output_tokens,
+        }
+        already = context.recorded_usage
+        new_runs = [run for run in context.subagent_runs if not run.get("recorded")]
+        brain = {
+            name: totals[name] - already.get(name, 0) - sum(run["usage"][name] for run in new_runs) for name in totals
+        }
+        call_inputs = Counter(entry.input_tokens for entry in usage.request_usage_entries[already.get("requests", 0) :])
+        call_inputs -= Counter(size for run in new_runs for size in run["usage"]["call_inputs"])
+        brain["max_input"] = max(call_inputs.elements(), default=0)
+        self.store.record_usage(context.session, "brain", model_name, brain)
+        for run in new_runs:
+            self.store.record_usage(context.session, "subagent", run["usage"]["model"], run["usage"])
+            for call_type, count in run["hosted_calls"].items():
+                self.store.record_usage(context.session, "tool", call_type, {"requests": count})
+            run["recorded"] = True
+        context.recorded_usage = totals
+
+    def usage_report(self, since_epoch: float = 0.0) -> dict:
+        """Cost, calls, tokens and largest context per session, split into voice / brain / subagents / tools."""
+        return costs.build_report(self.store.usage_by_session(since_epoch))
+
     def _save_pending(self, result: RunResult, context: FernContext, model_alias: str) -> list[dict]:
         """Paused for approval: persist the whole run so it can resume later, even after a restart."""
         pending_id = uuid.uuid4().hex
@@ -359,6 +382,7 @@ class Brain:
                 "device_commands": saved.device_commands,
                 "notes": saved.notes,
                 "subagent_runs": saved.subagent_runs,  # keep them across an approval pause
+                "recorded_usage": saved.recorded_usage,
             }
         )
         with self.store.db:
@@ -409,12 +433,22 @@ async def _finish_research_run(result: Any) -> str:
     it may echo instructions injected into a web page or document."""
     context: FernContext = result.context_wrapper.context
     hosted_calls = [_item_type(item.raw_item) for item in result.new_items if isinstance(item, ToolCallItem)]
+    own_calls = [response.usage for response in result.raw_responses]  # this subagent's model calls only
     context.subagent_runs.append(
         {
             "agent": "research",
             "items": trajectory_items(result),
             "output": str(result.final_output),
             "hosted_calls": {kind: hosted_calls.count(kind) for kind in set(hosted_calls)},
+            "usage": {
+                "model": str(result.last_agent.model),
+                "requests": len(own_calls),
+                "input": sum(call.input_tokens for call in own_calls),
+                "cached": sum(getattr(call.input_tokens_details, "cached_tokens", 0) or 0 for call in own_calls),
+                "output": sum(call.output_tokens for call in own_calls),
+                "call_inputs": [call.input_tokens for call in own_calls],
+                "max_input": max((call.input_tokens for call in own_calls), default=0),
+            },
         }
     )
     return untrusted("research", str(result.final_output))

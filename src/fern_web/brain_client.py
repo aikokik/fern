@@ -33,7 +33,7 @@ class BrainClient:
     async def notices(self, token: str) -> list[str]:
         return await self._call(token, "GET", "/v1/notices")
 
-    async def voice_log(self, token: str, seconds: float, transcript: list[dict], usage: dict) -> None:
+    async def voice_log(self, token: str, seconds: float, transcript: list[dict], usage: list[dict]) -> None:
         body = {"seconds": seconds, "transcript": transcript, "usage": usage}
         await self._call(token, "POST", "/v1/voice-log", body)
 

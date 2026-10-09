@@ -28,7 +28,8 @@ cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed; entr
 | `POST /v1/approvals/{id}` `{approve}` | resolve a risky action (single use, expires in 5 min) |
 | `GET /v1/sessions/{s}/stats` | tokens + cache-hit per model |
 
-Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` (used by the web app).
+Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` (used by the web app), and
+`GET /v1/usage` (cost report). **Usage page:** open `/usage` in the web app (same device token).
 
 **Docs:** [iPhone + voice web app](docs/iphone.md) · [Claude Code builder](docs/builder.md) · [always-on hosting](docs/hosting.md)
 
@@ -36,7 +37,8 @@ Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` 
 - **Tool:** `@tool(Tier.READ|ACT|RISKY, group=...)` in a module with `TOOLS` (+ `GROUPS`); `FERN_PLUGINS=my.module`.
 - **Skill:** `skills/<name>/SKILL.md` with `name`/`description` frontmatter; only the index goes in the prompt
   (`read_skill` stays hidden until a skill exists).
-- **Token usage:** `uv run fern usage --days 7` shows tokens per model (brain + voice). Budget knobs:
+- **Research documents:** set `FERN_VECTOR_STORE_IDS=vs_...` to let the research subagent use OpenAI file_search.
+- **Token usage:** the `/usage` page or `uv run fern usage --days 7` (cost per part; prices in `src/fern/costs.py`). Knobs:
   `FERN_REASONING_EFFORT`, `FERN_VOICE_MAX_OUTPUT_TOKENS`, `FERN_VOICE_CONTEXT_TOKENS`, `FERN_MODELS`.
 - **Standing instructions:** `data/HOUSEHOLD.md`.
 - **MCP:** `data/mcp.json` `{"name": {"command": "...", "args": []}}`; every call needs approval.

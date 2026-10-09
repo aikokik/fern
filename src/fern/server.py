@@ -91,12 +91,17 @@ async def notices(device_name: str = Depends(device)) -> list[str]:
 class VoiceLog(BaseModel):
     seconds: float = Field(ge=0, le=86400)
     transcript: list[dict[str, str]] = Field(default_factory=list, max_length=2000)
-    usage: dict[str, int | str] = Field(default_factory=dict)  # voice model tokens: model, requests, input, ...
+    usage: list[dict[str, int | str]] = Field(default_factory=list, max_length=4)  # voice + transcription rows
 
 
 @app.post("/v1/voice-log", status_code=204)
 async def voice_log(body: VoiceLog, device_name: str = Depends(device)) -> None:
     brain.voice_log(device_name, body.seconds, body.transcript, body.usage)
+
+
+@app.get("/v1/usage")
+async def usage(_: str = Depends(device)) -> dict:
+    return brain.usage_report()
 
 
 @app.get("/v1/sessions/{session}/stats")
