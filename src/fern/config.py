@@ -39,8 +39,6 @@ class Settings:
         os.getenv("FERN_ALLOWED_HOSTS", "api.openai.com,api.anthropic.com,api.github.com,ntfy.sh").split(",")
     )
     device_tokens: dict[str, str] = field(default_factory=lambda: _parse_pairs(os.getenv("FERN_DEVICE_TOKENS", "")))
-    home_url: str = os.getenv("HA_URL", "")
-    home_token: str = os.getenv("HA_TOKEN", "")
     memory: str = os.getenv("FERN_MEMORY", "fern.memory:SQLiteMemory")  # swap in any Memory impl
     plugins: tuple[str, ...] = _parse_list(os.getenv("FERN_PLUGINS", ""))
     tracing: bool = os.getenv("FERN_TRACING") == "1"  # opt-in upload of traces to OpenAI's dashboard

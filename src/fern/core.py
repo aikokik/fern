@@ -44,8 +44,7 @@ class EgressBlockedError(Exception):
 
 
 def http_client(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
-    extra_hosts = {httpx.URL(settings.home_url).host} if settings.home_url else set()
-    allowed_hosts = set(settings.allowed_hosts) | extra_hosts
+    allowed_hosts = set(settings.allowed_hosts)
 
     async def block_unlisted_hosts(request: httpx.Request) -> None:
         if request.url.host not in allowed_hosts:
@@ -54,11 +53,6 @@ def http_client(settings: Settings, transport: httpx.AsyncBaseTransport | None =
     return httpx.AsyncClient(
         timeout=10, follow_redirects=False, event_hooks={"request": [block_unlisted_hosts]}, transport=transport
     )
-
-
-def untrusted(source: str, text: str) -> str:
-    """Mark external content as data. Instructions tell the model never to follow text inside these tags."""
-    return f"<untrusted source={source!r}>\n{text}\n</untrusted>"
 
 
 def tool(tier: Tier, group: str | None = None, timeout: float = 20) -> Callable[[Callable], Any]:

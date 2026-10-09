@@ -39,7 +39,7 @@ TOOLS: list[RealtimeToolsConfigUnionParam] = [
     {
         "type": "function",
         "name": "ask_fern",
-        "description": "Send the user's request to fern's brain (alarms, home, memory, Claude Code builder).",
+        "description": "Send the user's request to fern's brain (alarms, memory, Claude Code builder).",
         "parameters": {
             "type": "object",
             "properties": {"request": {"type": "string", "description": "The user's request, in their words."}},

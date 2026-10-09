@@ -19,7 +19,11 @@ from inspect_ai.util import store
 
 from fern.brain import Brain
 from fern.config import settings
-from fern.fakes import world
+
+
+def _offline(_request: httpx.Request) -> httpx.Response:
+    """Evals never touch real services (Claude Code, GitHub, ntfy)."""
+    return httpx.Response(503)
 
 
 @agent
@@ -29,11 +33,9 @@ def household_brain() -> Agent:
             settings,
             data_dir=Path(tempfile.mkdtemp()),
             models={"main": "inspect", "fast": "inspect"},
-            home_url="http://ha.local:8123",
-            home_token="eval",
             tracing=False,
         )
-        async with agent_bridge(state) as bridge, Brain(eval_settings, httpx.MockTransport(world)) as brain:
+        async with agent_bridge(state) as bridge, Brain(eval_settings, httpx.MockTransport(_offline)) as brain:
             response = await brain.run(state.messages[-1].text, device="phone", session="eval")
             store().set("response", response)
         return bridge.state

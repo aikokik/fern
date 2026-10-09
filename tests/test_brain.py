@@ -12,22 +12,27 @@ from agents.testing import ScriptedModel, assistant_message, function_call
 from fern.brain import Brain, trim_history
 from fern.config import Settings
 from fern.core import EgressBlockedError, http_client
-from fern.fakes import world
 from fern.store import GLOBAL
 
-UNLOCK_FRONT_DOOR = {"domain": "lock", "service": "unlock", "entity_id": "lock.front"}
-KITCHEN_LIGHT_OFF = {"domain": "light", "service": "turn_off", "entity_id": "light.kitchen"}
+BUILDER = {"builder_url": "https://api.anthropic.com/v1/fire", "builder_token": "rt"}
+PLAN_TV = {"kind": "plan", "spec": "Plan TV control."}
+
+
+def offline(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(503)
+
+
+def claude_code_accepts(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"claude_code_session_url": "https://claude.ai/code/session_1"})
 
 
 @pytest.fixture
 async def make_brain(tmp_path):
-    """Build a Brain whose network is `handler` (default: the fake world), with optional settings overrides."""
-    base_settings = Settings(
-        data_dir=tmp_path, skills_dir=Settings().skills_dir, home_url="http://ha.local:8123", home_token="t"
-    )
+    """Build a Brain whose network is `handler` (default: offline), with optional settings overrides."""
+    base_settings = Settings(data_dir=tmp_path, skills_dir=Settings().skills_dir)
     async with AsyncExitStack() as cleanup:
 
-        async def build(handler=world, **overrides) -> Brain:
+        async def build(handler=offline, **overrides) -> Brain:
             brain = Brain(replace(base_settings, **overrides), httpx.MockTransport(handler))
             return await cleanup.enter_async_context(brain)
 
@@ -80,72 +85,49 @@ async def test_errors_and_lookups_go_back_to_the_model(brain):
 
 
 async def test_built_in_tools_need_no_load_step(brain):
-    model = script(brain, [[function_call("home_control", KITCHEN_LIGHT_OFF, call_id="c1")]])
-    response = await brain.run("turn off the kitchen light", session="s3")
+    model = script(brain, [[function_call("set_alarm", {"time": "07:00", "label": ""}, call_id="c1")]])
+    await brain.run("alarm at 7", session="s3")
     tools_shown = visible_tools(model.calls[0])
-    assert {"home_control", "home_states", "home_secure", "request_change"} <= tools_shown
+    assert {"set_alarm", "remember", "recall", "request_change", "build_status"} <= tools_shown
     assert "load_tools" not in tools_shown  # no plugin groups registered
     assert "read_skill" not in tools_shown  # no skills in skills/
-    assert response["reply"] == "Done: turn off light.kitchen."
-    assert len(model.calls) == 1
 
 
-async def test_risky_action_waits_for_approval(make_brain):
-    home_assistant_calls = []
+async def test_risky_action_waits_for_approval_and_resumes_without_a_model_call(make_brain):
+    sent_requests = []
 
-    def home_assistant(request: httpx.Request) -> httpx.Response:
-        home_assistant_calls.append((request.method, request.url.path, request.headers["authorization"]))
-        return httpx.Response(200, json=[])
+    def claude_code(request: httpx.Request) -> httpx.Response:
+        sent_requests.append(request.url.host)
+        return claude_code_accepts(request)
 
-    brain = await make_brain(home_assistant)
-    model = script(brain, [[function_call("home_secure", UNLOCK_FRONT_DOOR, call_id="c1")]])
-    response = await brain.run("unlock the front door", session="s4")
-    assert response["pending"][0]["tool"] == "home_secure"
-    assert not home_assistant_calls  # nothing ran yet
+    brain = await make_brain(claude_code, **BUILDER)
+    model = script(brain, [[function_call("request_change", PLAN_TV, call_id="c1")]])
+    response = await brain.run("ask Claude Code to plan TV control", session="s4")
+    assert response["pending"][0]["tool"] == "request_change"
+    assert not sent_requests  # nothing ran yet
 
     response = await brain.resolve(response["pending"][0]["id"], approve=True)
-    assert home_assistant_calls == [("POST", "/api/services/lock/unlock", "Bearer t")]
-    assert response["reply"] == "Done: unlock lock.front."
-    assert len(model.calls) == 1  # approval resumed straight into the tool; no extra model call
+    assert sent_requests == ["api.anthropic.com"]
+    assert response["reply"].startswith("Claude Code started (plan)")
+    assert len(model.calls) == 1  # approval resumed straight into the tool
     assert brain.store.stats("s4")[0]["requests"] >= 1
 
 
-async def test_rejection_is_single_use_and_never_mode_hides_risky_tools(brain, make_brain):
-    script(brain, [[function_call("home_secure", UNLOCK_FRONT_DOOR, call_id="c1")]])
-    pending_id = (await brain.run("unlock", session="s5"))["pending"][0]["id"]
+async def test_rejection_is_single_use_and_never_mode_hides_risky_tools(make_brain):
+    brain = await make_brain(claude_code_accepts, **BUILDER)
+    script(brain, [[function_call("request_change", PLAN_TV, call_id="c1")]])
+    pending_id = (await brain.run("plan TV control", session="s5"))["pending"][0]["id"]
     response = await brain.resolve(pending_id, approve=False)
     assert response["reply"]  # the SDK's rejection message reaches the user
+    assert brain.store.get(GLOBAL, "builds", []) == []  # rejected request never fired
     with pytest.raises(KeyError):  # single use: can't flip a rejection into an approval
         await brain.resolve(pending_id, approve=True)
 
     never_brain = await make_brain(approval="never")
     model = ScriptedModel([[assistant_message("I can't do that.")]])
     never_brain.agent().model = model
-    await never_brain.run("unlock", session="s6")
-    assert "home_secure" not in visible_tools(model.calls[0])
-
-
-async def test_domain_allowlist(brain):
-    model = script(
-        brain,
-        [
-            [function_call("home_control", UNLOCK_FRONT_DOOR, call_id="c1")],
-            [assistant_message("I can't unlock doors that way.")],
-        ],
-    )
-    await brain.run("unlock via the wrong tool", session="s7")
-    assert "not allowed" in json.dumps(model.calls[1].input)
-
-
-async def test_home_states_are_marked_untrusted(brain):
-    model = script(
-        brain,
-        [[function_call("home_states", {"domain": "light"}, call_id="c1")], [assistant_message("Kitchen is on.")]],
-    )
-    await brain.run("which lights are on?", session="s8")
-    tool_result = json.dumps(model.calls[1].input)
-    assert "<untrusted source='home_assistant'>" in tool_result
-    assert "light.kitchen: on" in tool_result
+    await never_brain.run("plan TV control", session="s6")
+    assert "request_change" not in visible_tools(model.calls[0])
 
 
 async def test_egress_blocked():

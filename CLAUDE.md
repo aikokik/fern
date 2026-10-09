@@ -13,7 +13,7 @@ Household AI. Two packages, separate containers:
   user-ready sentence, or a string starting with `error` to hand the problem back to the model. Prefer adding a plugin module (exposes `TOOLS`, optional `GROUPS`) under
   `src/fern/tools/` and registering it in `src/fern/tools/__init__.py`.
 - Skills: `skills/<name>/SKILL.md` with `name`/`description` frontmatter.
-- External content returned to the model goes through `untrusted(source, text)`.
+- Only build what was asked for: no speculative integrations or "for later" scaffolding.
 - Outbound HTTP uses `FernContext.http` (egress allowlist). New hosts need `FERN_ALLOWED_HOSTS` **and** `deploy/allowlist`.
 - Keep code minimal: no speculative abstractions, match the surrounding style, comments only for non-obvious "why".
 - Names are descriptive: no single-letter or cryptic variables (`settings`, `response`, `event`, `job`, not `s`, `r`,
