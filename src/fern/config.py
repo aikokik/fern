@@ -5,7 +5,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
+
+from openai.types.shared import ReasoningEffort
 
 
 def _parse_pairs(raw: str) -> dict[str, str]:
@@ -15,6 +18,10 @@ def _parse_pairs(raw: str) -> dict[str, str]:
 
 def _parse_list(raw: str) -> tuple[str, ...]:
     return tuple(item for item in raw.split(",") if item)
+
+
+# none | minimal | low | medium | high | xhigh | max (the API rejects anything else)
+_REASONING_EFFORT = cast(ReasoningEffort, os.getenv("FERN_REASONING_EFFORT", "low"))
 
 
 @dataclass(frozen=True)
@@ -29,12 +36,9 @@ class Settings:
     approval: str = os.getenv("FERN_APPROVAL", "on-risk")
     # App-level egress allowlist (the Docker proxy enforces the same list at network level).
     allowed_hosts: frozenset[str] = frozenset(
-        os.getenv(
-            "FERN_ALLOWED_HOSTS", "api.openai.com,hacker-news.firebaseio.com,api.anthropic.com,api.github.com,ntfy.sh"
-        ).split(",")
+        os.getenv("FERN_ALLOWED_HOSTS", "api.openai.com,api.anthropic.com,api.github.com,ntfy.sh").split(",")
     )
     device_tokens: dict[str, str] = field(default_factory=lambda: _parse_pairs(os.getenv("FERN_DEVICE_TOKENS", "")))
-    reader_url: str = os.getenv("FERN_READER_URL", "")  # set in Docker; empty = read articles in-process
     home_url: str = os.getenv("HA_URL", "")
     home_token: str = os.getenv("HA_TOKEN", "")
     memory: str = os.getenv("FERN_MEMORY", "fern.memory:SQLiteMemory")  # swap in any Memory impl
@@ -50,11 +54,8 @@ class Settings:
     ntfy_server: str = os.getenv("FERN_NTFY_SERVER", "https://ntfy.sh")
     ntfy_topic: str = os.getenv("FERN_NTFY_TOPIC", "")
     timezone: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
-    # Briefing voice (OpenAI TTS). Short replies are spoken on-device by the phone instead.
-    tts_model: str = os.getenv("FERN_TTS_MODEL", "gpt-4o-mini-tts")
-    tts_voice: str = os.getenv("FERN_TTS_VOICE", "coral")
-    # Daily wake-up times (HH:MM) to pre-generate the briefing for, besides alarms set through fern.
-    briefing_at: tuple[str, ...] = _parse_list(os.getenv("FERN_BRIEFING_AT", ""))
+    # Reasoning tokens are billed as output; household requests rarely need deep reasoning.
+    reasoning_effort: ReasoningEffort = _REASONING_EFFORT
 
     @property
     def db(self) -> Path:

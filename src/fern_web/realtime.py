@@ -39,7 +39,7 @@ TOOLS: list[RealtimeToolsConfigUnionParam] = [
     {
         "type": "function",
         "name": "ask_fern",
-        "description": "Send the user's request to fern's brain (tools, memory, news, alarms, home, approvals).",
+        "description": "Send the user's request to fern's brain (alarms, home, memory, Claude Code builder).",
         "parameters": {
             "type": "object",
             "properties": {"request": {"type": "string", "description": "The user's request, in their words."}},
@@ -73,6 +73,12 @@ def session_config(settings: WebSettings, profile: dict) -> RealtimeSessionCreat
         "model": settings.model,
         "instructions": instructions,
         "max_output_tokens": settings.max_output_tokens,  # hard cap per spoken reply (audio tokens are costly)
+        # Long sessions: drop old turns past the limit instead of re-reading them every turn.
+        "truncation": {
+            "type": "retention_ratio",
+            "retention_ratio": 0.6,
+            "token_limits": {"post_instructions": settings.context_tokens},
+        },
         "tools": TOOLS,
         "audio": {
             "input": {

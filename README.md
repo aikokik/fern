@@ -5,8 +5,7 @@ phone/laptop ─Tailscale HTTPS─▶ ingress ─▶ web (src/fern_web: voice UI
      │ WebRTC audio ──▶ OpenAI Realtime ◀── server channel (tool calls) ──┘          │ device token
                                                                                      ▼
                                        brain (src/fern: API only, sealed net, read-only, non-root) ─▶ egress proxy (allowlist)
-                                        ├─ fern (main model): tools, deferred groups, skills, memory, approvals, scheduler
-                                        ├─ news_desk (fast model): untrusted content, no side-effect tools ─▶ reader container
+                                        ├─ fern (main model): alarms, home, memory, approvals, scheduler (1 call per action)
                                         └─ request_change (approved spec) ─▶ Claude Code Routine ─▶ PR ─▶ you merge ─▶ deployer
 ```
 
@@ -26,8 +25,6 @@ cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed; entr
 |---|---|
 | `POST /v1/chat` `{text, session?, model?}` | → `{reply, commands, pending, tools}`; the device executes `commands` (e.g. `alarm.set`) |
 | `POST /v1/approvals/{id}` `{approve}` | resolve a risky action (single use, expires in 5 min) |
-| `GET /v1/briefing` | briefing text (cached 2h; pre-generated before alarms) |
-| `GET /v1/briefing/audio` | the same as mp3 (OpenAI TTS) |
 | `GET /v1/sessions/{s}/stats` | tokens + cache-hit per model |
 
 Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` (used by the web app).
@@ -36,7 +33,10 @@ Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` 
 
 ## Extend
 - **Tool:** `@tool(Tier.READ|ACT|RISKY, group=...)` in a module with `TOOLS` (+ `GROUPS`); `FERN_PLUGINS=my.module`.
-- **Skill:** `skills/<name>/SKILL.md` with `name`/`description` frontmatter; only the index goes in the prompt.
+- **Skill:** `skills/<name>/SKILL.md` with `name`/`description` frontmatter; only the index goes in the prompt
+  (`read_skill` stays hidden until a skill exists).
+- **Token usage:** `uv run fern usage --days 7` shows tokens per model (brain + voice). Budget knobs:
+  `FERN_REASONING_EFFORT`, `FERN_VOICE_MAX_OUTPUT_TOKENS`, `FERN_VOICE_CONTEXT_TOKENS`, `FERN_MODELS`.
 - **Standing instructions:** `data/HOUSEHOLD.md`.
 - **MCP:** `data/mcp.json` `{"name": {"command": "...", "args": []}}`; every call needs approval.
 - **Memory research:** implement `remember/recall` (`fern.memory.Memory`), set `FERN_MEMORY=module:Class`.

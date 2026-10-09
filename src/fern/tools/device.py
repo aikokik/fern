@@ -22,7 +22,7 @@ async def set_alarm(run: RunContextWrapper[FernContext], time: str, label: str =
         return "error: time must be HH:MM (24h)"
     context = run.context
     context.device_commands.append({"type": "alarm.set", "device": context.device, "time": time, "label": label[:60]})
-    return f"alarm set for {time} on {context.device}"
+    return f"Alarm set for {time}."
 
 
 TOOLS = [set_alarm]

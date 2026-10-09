@@ -44,7 +44,7 @@ class EgressBlockedError(Exception):
 
 
 def http_client(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
-    extra_hosts = {httpx.URL(url).host for url in (settings.home_url, settings.reader_url) if url}
+    extra_hosts = {httpx.URL(settings.home_url).host} if settings.home_url else set()
     allowed_hosts = set(settings.allowed_hosts) | extra_hosts
 
     async def block_unlisted_hosts(request: httpx.Request) -> None:

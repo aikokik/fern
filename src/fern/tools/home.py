@@ -1,11 +1,10 @@
-"""Home Assistant bridge. Deferred group: loaded only when a request needs the home.
-Domains are allowlisted and split by tier; the HA token stays in the HTTP client, never in context."""
+"""Home Assistant bridge. Domains are allowlisted and split by tier; the HA token stays in the HTTP client,
+never in context."""
 
 from agents import RunContextWrapper
 
-from fern.core import FernContext, Tier, tool
+from fern.core import FernContext, Tier, tool, untrusted
 
-GROUPS = {"home": "Home Assistant: read device states, control lights/media, locks/climate (approval)."}
 ACT_DOMAINS = {"light", "switch", "fan", "media_player", "scene"}
 RISKY_DOMAINS = {"lock", "climate", "cover", "alarm_control_panel", "water_heater", "vacuum"}
 
@@ -30,10 +29,10 @@ async def _call_service(
     if domain not in allowed_domains or not entity_id.startswith(f"{domain}."):
         return f"error: {domain}.{service} on {entity_id} not allowed by this tool"
     await _home_assistant(context, "POST", f"services/{domain}/{service}", {"entity_id": entity_id})
-    return f"ok: {domain}.{service} {entity_id}"
+    return f"Done: {service.replace('_', ' ')} {entity_id}."
 
 
-@tool(Tier.READ, group="home")
+@tool(Tier.READ)
 async def home_states(run: RunContextWrapper[FernContext], domain: str) -> str:
     """List entities and their states for one domain (e.g. 'light', 'lock').
 
@@ -41,14 +40,17 @@ async def home_states(run: RunContextWrapper[FernContext], domain: str) -> str:
         domain: Home Assistant domain.
     """
     entities = await _home_assistant(run.context, "GET", "states")
-    return "\n".join(
-        f"{entity['entity_id']}: {entity['state']}"
-        for entity in entities
-        if entity["entity_id"].startswith(f"{domain}.")
+    return untrusted(
+        "home_assistant",
+        "\n".join(
+            f"{entity['entity_id']}: {entity['state']}"
+            for entity in entities
+            if entity["entity_id"].startswith(f"{domain}.")
+        ),
     )
 
 
-@tool(Tier.ACT, group="home")
+@tool(Tier.ACT)
 async def home_control(run: RunContextWrapper[FernContext], domain: str, service: str, entity_id: str) -> str:
     """Control lights, switches, fans, media players, scenes.
 
@@ -60,7 +62,7 @@ async def home_control(run: RunContextWrapper[FernContext], domain: str, service
     return await _call_service(run.context, ACT_DOMAINS, domain, service, entity_id)
 
 
-@tool(Tier.RISKY, group="home")
+@tool(Tier.RISKY)
 async def home_secure(run: RunContextWrapper[FernContext], domain: str, service: str, entity_id: str) -> str:
     """Control locks, climate, covers, alarm panels, water heater, vacuum. Requires human approval.
 

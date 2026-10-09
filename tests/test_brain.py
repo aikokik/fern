@@ -1,15 +1,14 @@
 """Offline tests: ScriptedModel stands in for the LLM, httpx.MockTransport for the network."""
 
 import json
+import time
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from datetime import timedelta
 
 import httpx
 import pytest
 from agents.testing import ScriptedModel, assistant_message, function_call
 
-from fern import reader
 from fern.brain import Brain, trim_history
 from fern.config import Settings
 from fern.core import EgressBlockedError, http_client
@@ -17,6 +16,7 @@ from fern.fakes import world
 from fern.store import GLOBAL
 
 UNLOCK_FRONT_DOOR = {"domain": "lock", "service": "unlock", "entity_id": "lock.front"}
+KITCHEN_LIGHT_OFF = {"domain": "light", "service": "turn_off", "entity_id": "light.kitchen"}
 
 
 @pytest.fixture
@@ -50,61 +50,47 @@ def visible_tools(model_call) -> set[str]:
     return {function.name for function in model_call.tools}
 
 
-async def test_alarm_queues_device_command(brain):
-    script(
-        brain,
-        [
-            [function_call("set_alarm", {"time": "06:30", "label": "gym"}, call_id="c1")],
-            [assistant_message("Alarm set for 6:30.")],
-        ],
-    )
+async def test_action_finishes_in_one_model_call(brain):
+    model = script(brain, [[function_call("set_alarm", {"time": "06:30", "label": "gym"}, call_id="c1")]])
     response = await brain.run("wake me 6:30 for gym", device="phone", session="s1")
+    assert len(model.calls) == 1  # no second call just to restate the result
+    assert response["reply"] == "Alarm set for 06:30."
     assert response["commands"] == [{"type": "alarm.set", "device": "phone", "time": "06:30", "label": "gym"}]
     assert response["tools"] == ["set_alarm"]
-    assert response["reply"] == "Alarm set for 6:30."
     assert not response["pending"]
 
 
-async def test_news_subagent_isolated_and_untrusted(brain, monkeypatch):
-    monkeypatch.setattr(reader, "_client", httpx.AsyncClient(transport=httpx.MockTransport(world)))
-    orchestrator = script(
+async def test_errors_and_lookups_go_back_to_the_model(brain):
+    model = script(
         brain,
         [
-            [function_call("news_desk", {"input": "top 2"}, call_id="c1")],
-            [assistant_message("Two stories.")],
+            [function_call("set_alarm", {"time": "7am", "label": ""}, call_id="c1")],  # error -> model retries
+            [
+                function_call("set_alarm", {"time": "07:00", "label": ""}, call_id="c2"),
+                function_call("recall", {"query": "wake"}, call_id="c3"),  # lookup in the same step -> continue
+            ],
+            [assistant_message("Alarm set for 7. Nothing saved about waking.")],
         ],
     )
-    subagent = brain.news_desk.model = ScriptedModel(
-        [
-            [function_call("hn_top", {"count": 2}, call_id="n1")],
-            [function_call("read_story", {"item_id": 2}, call_id="n2")],
-            [assistant_message("Story 2; Story 1.")],
-        ]
-    )
-    response = await brain.run("news?", session="s2")
-    assert response["reply"] == "Two stories."
-
-    subagent_input = json.dumps(subagent.calls[-1].input)
-    assert "<untrusted source='hackernews'>" in subagent_input
-    assert "[2] Story 2 (20 pts, ex2.com)" in subagent_input
-    assert "<untrusted source='article'>" in subagent_input
-    assert "Story 2 Article 2 body." in subagent_input
-    assert "menu" not in subagent_input
-    assert "x()" not in subagent_input
-    assert "Story 1" not in json.dumps(orchestrator.calls[0].input)  # orchestrator never saw raw HN data
-    assert "<untrusted source='news_desk'>" in json.dumps(orchestrator.calls[1].input)  # subagent output = data
-
-    # The subagent's own steps are logged inside the parent's trajectory record (evals / fine-tuning data).
-    record = json.loads(brain.store.trajectories_file.read_text().splitlines()[-1])
-    [subagent_run] = record["subagent_runs"]
-    assert subagent_run["agent"] == "news_desk"
-    assert subagent_run["output"] == "Story 2; Story 1."
-    subagent_calls = [item["name"] for item in subagent_run["items"] if item.get("type") == "function_call"]
-    assert subagent_calls == ["hn_top", "read_story"]
-    assert any("Article 2 body" in json.dumps(item) for item in subagent_run["items"])  # tool results included
+    response = await brain.run("alarm at 7am", session="s2")
+    assert len(model.calls) == 3
+    assert "time must be HH:MM" in json.dumps(model.calls[1].input)
+    assert response["reply"] == "Alarm set for 7. Nothing saved about waking."
+    assert response["commands"][0]["time"] == "07:00"
 
 
-async def test_deferred_group_and_risky_approval(make_brain):
+async def test_built_in_tools_need_no_load_step(brain):
+    model = script(brain, [[function_call("home_control", KITCHEN_LIGHT_OFF, call_id="c1")]])
+    response = await brain.run("turn off the kitchen light", session="s3")
+    tools_shown = visible_tools(model.calls[0])
+    assert {"home_control", "home_states", "home_secure", "request_change"} <= tools_shown
+    assert "load_tools" not in tools_shown  # no plugin groups registered
+    assert "read_skill" not in tools_shown  # no skills in skills/
+    assert response["reply"] == "Done: turn off light.kitchen."
+    assert len(model.calls) == 1
+
+
+async def test_risky_action_waits_for_approval(make_brain):
     home_assistant_calls = []
 
     def home_assistant(request: httpx.Request) -> httpx.Response:
@@ -112,70 +98,58 @@ async def test_deferred_group_and_risky_approval(make_brain):
         return httpx.Response(200, json=[])
 
     brain = await make_brain(home_assistant)
-    model = script(
-        brain,
-        [
-            [function_call("load_tools", {"group": "home"}, call_id="c1")],
-            [function_call("home_secure", UNLOCK_FRONT_DOOR, call_id="c2")],
-            [assistant_message("Front door unlocked.")],
-        ],
-    )
-    response = await brain.run("unlock the front door", session="s3")
-    assert "home_secure" not in visible_tools(model.calls[0])
-    assert "home_secure" in visible_tools(model.calls[1])
-    assert "Tool group 'home' loaded" in json.dumps(model.calls[1].input)  # mid-conversation system note
+    model = script(brain, [[function_call("home_secure", UNLOCK_FRONT_DOOR, call_id="c1")]])
+    response = await brain.run("unlock the front door", session="s4")
     assert response["pending"][0]["tool"] == "home_secure"
-    assert not home_assistant_calls
+    assert not home_assistant_calls  # nothing ran yet
 
     response = await brain.resolve(response["pending"][0]["id"], approve=True)
     assert home_assistant_calls == [("POST", "/api/services/lock/unlock", "Bearer t")]
-    assert response["reply"] == "Front door unlocked."
-    assert brain.store.get("s3", "loaded_groups") == ["home"]  # group stays loaded for this session
-    assert brain.store.stats("s3")[0]["requests"] >= 3
+    assert response["reply"] == "Done: unlock lock.front."
+    assert len(model.calls) == 1  # approval resumed straight into the tool; no extra model call
+    assert brain.store.stats("s4")[0]["requests"] >= 1
 
 
-async def test_rejection_and_never_mode(brain, make_brain):
-    script(
-        brain,
-        [
-            [function_call("load_tools", {"group": "home"}, call_id="c1")],
-            [function_call("home_secure", UNLOCK_FRONT_DOOR, call_id="c2")],
-            [assistant_message("Okay, I won't.")],
-        ],
-    )
-    pending_id = (await brain.run("unlock", session="s4"))["pending"][0]["id"]
+async def test_rejection_is_single_use_and_never_mode_hides_risky_tools(brain, make_brain):
+    script(brain, [[function_call("home_secure", UNLOCK_FRONT_DOOR, call_id="c1")]])
+    pending_id = (await brain.run("unlock", session="s5"))["pending"][0]["id"]
     response = await brain.resolve(pending_id, approve=False)
-    assert response["reply"] == "Okay, I won't."
+    assert response["reply"]  # the SDK's rejection message reaches the user
     with pytest.raises(KeyError):  # single use: can't flip a rejection into an approval
         await brain.resolve(pending_id, approve=True)
 
     never_brain = await make_brain(approval="never")
-    model = ScriptedModel(
-        [
-            [function_call("load_tools", {"group": "home"}, call_id="c1")],
-            [assistant_message("ok")],
-        ]
-    )
+    model = ScriptedModel([[assistant_message("I can't do that.")]])
     never_brain.agent().model = model
-    await never_brain.run("unlock", session="s5")
-    assert "home_secure" not in visible_tools(model.calls[1])
+    await never_brain.run("unlock", session="s6")
+    assert "home_secure" not in visible_tools(model.calls[0])
 
 
 async def test_domain_allowlist(brain):
     model = script(
         brain,
         [
-            [function_call("load_tools", {"group": "home"}, call_id="c1")],
-            [function_call("home_control", UNLOCK_FRONT_DOOR, call_id="c2")],
-            [assistant_message("no")],
+            [function_call("home_control", UNLOCK_FRONT_DOOR, call_id="c1")],
+            [assistant_message("I can't unlock doors that way.")],
         ],
     )
-    await brain.run("unlock via the wrong tool", session="s6")
-    assert "not allowed" in json.dumps(model.calls[2].input)
+    await brain.run("unlock via the wrong tool", session="s7")
+    assert "not allowed" in json.dumps(model.calls[1].input)
+
+
+async def test_home_states_are_marked_untrusted(brain):
+    model = script(
+        brain,
+        [[function_call("home_states", {"domain": "light"}, call_id="c1")], [assistant_message("Kitchen is on.")]],
+    )
+    await brain.run("which lights are on?", session="s8")
+    tool_result = json.dumps(model.calls[1].input)
+    assert "<untrusted source='home_assistant'>" in tool_result
+    assert "light.kitchen: on" in tool_result
 
 
 async def test_egress_blocked():
-    client = http_client(Settings(allowed_hosts=frozenset({"hacker-news.firebaseio.com"})))
+    client = http_client(Settings(allowed_hosts=frozenset({"api.openai.com"})))
     with pytest.raises(EgressBlockedError):
         await client.get("https://evil.example.com/x")
 
@@ -193,74 +167,25 @@ def test_trim_keeps_turn_boundaries():
     assert trim_history(items[:24], 4) == items[:24]  # 8 turns: untouched (cache prefix stays stable)
 
 
-async def test_alarm_schedules_briefing_audio(brain, monkeypatch):
-    spoken_texts = []
-
-    async def fake_speak(_settings, text):
-        spoken_texts.append(text)
-        return b"mp3"
-
-    monkeypatch.setattr("fern.brain.speak", fake_speak)
-    in_ten_minutes = (brain.settings.now() + timedelta(minutes=10)).strftime("%H:%M")
-    script(
-        brain,
-        [
-            [function_call("set_alarm", {"time": in_ten_minutes, "label": ""}, call_id="c1")],
-            [assistant_message("Set.")],
-            [assistant_message("Good morning. Story 1 is about X.")],
-        ],
-    )
-    await brain.run(f"alarm at {in_ten_minutes}", device="phone", session="s7")
-    assert len(brain.store.get(GLOBAL, "alarms")) == 1
-
-    assert await brain.prepare_briefings()  # alarm within lead time -> pre-generated
-    assert not brain.store.get(GLOBAL, "alarms")
-    assert spoken_texts == ["Good morning. Story 1 is about X."]
-    audio_file = await brain.briefing_audio()  # alarm-stop request: served from cache, no new model or TTS call
-    assert audio_file.read_bytes() == b"mp3"
-    assert len(spoken_texts) == 1
-    assert not await brain.prepare_briefings()  # nothing due anymore
-
-
-async def test_reader_refuses_private_addresses():
-    for url in ("http://127.0.0.1:8765/v1/chat", "http://localhost/", "http://192.168.1.1/"):
-        with pytest.raises(httpx.ConnectError):
-            await reader._public_addresses_only(httpx.Request("GET", url))
-
-
-async def test_request_change_failure_returns_log_reference(make_brain):
-    brain = await make_brain(
-        lambda request: httpx.Response(503), builder_url="https://api.anthropic.com/v1/fire", builder_token="rt"
-    )
-    model = script(
-        brain,
-        [
-            [function_call("load_tools", {"group": "builder"}, call_id="c1")],
-            [function_call("request_change", {"kind": "plan", "spec": "TV control"}, call_id="c2")],
-            [assistant_message("Something went wrong.")],
-        ],
-    )
-    pending_id = (await brain.run("plan TV control", session="s11"))["pending"][0]["id"]
-    await brain.resolve(pending_id, approve=True)
-    tool_result = json.dumps(model.calls[-1].input)
-    assert "could not start Claude Code (HTTPStatusError)" in tool_result
-    assert "check the fern logs for reference" in tool_result
-    assert brain.store.get(GLOBAL, "builds", []) == []  # failed request is not tracked as a job
-
-
-async def test_notices_profile_voice_log(brain):
+async def test_notices_profile_voice_log_and_usage(brain):
     brain.notice("TV control is ready")
     assert brain.notices_for("phone") == ["TV control is ready"]
     assert brain.notices_for("phone") == []  # delivered once per device
     assert brain.notices_for("ipad") == ["TV control is ready"]
 
     brain.memory.remember("Sam wakes at 07:00")
-    brain.voice_log("phone", 42.0, [{"role": "user", "text": "hi"}])
+    voice_usage = {"model": "gpt-realtime-2.1-mini", "requests": 3, "input": 900, "cached": 300, "output": 400}
+    brain.voice_log("phone", 42.0, [{"role": "user", "text": "hi"}], voice_usage)
     profile = brain.profile("phone")
     assert profile["facts"] == ["Sam wakes at 07:00"]
     assert profile["voice_seconds_today"] == 42.0
     assert brain.profile("ipad")["voice_seconds_today"] == 0
     assert '"voice": true' in brain.store.trajectories_file.read_text()
+
+    [voice_row] = brain.store.usage_since(time.time() - 60)
+    assert voice_row["model"] == "gpt-realtime-2.1-mini"
+    assert (voice_row["requests"], voice_row["input"], voice_row["output"]) == (3, 900, 400)
+    assert brain.store.usage_since(time.time() + 60) == []  # time window respected
 
 
 async def test_request_change_needs_approval_then_fires_exact_spec(make_brain):
@@ -290,7 +215,7 @@ async def test_request_change_needs_approval_then_fires_exact_spec(make_brain):
             return httpx.Response(200, json={"check_runs": [{"status": "completed", "conclusion": "success"}]})
         return httpx.Response(200)
 
-    test_brain = await make_brain(
+    brain = await make_brain(
         outside_world,
         builder_url="https://api.anthropic.com/v1/fire",
         builder_token="rt",
@@ -299,27 +224,24 @@ async def test_request_change_needs_approval_then_fires_exact_spec(make_brain):
         ntfy_topic="topic123",
     )
     spec = "Add a tv plugin: media_player on/off/volume via Home Assistant, with tests."
-    test_brain.agent().model = ScriptedModel(
-        [
-            [function_call("load_tools", {"group": "builder"}, call_id="c1")],
-            [function_call("request_change", {"kind": "change", "spec": spec}, call_id="c2")],
-            [assistant_message("Claude Code is on it.")],
-        ]
+    brain.agent().model = ScriptedModel(
+        [[function_call("request_change", {"kind": "change", "spec": spec}, call_id="c1")]]
     )
-    response = await test_brain.run("tell claude code to add TV control", session="s9")
+    response = await brain.run("tell claude code to add TV control", session="s9")
     assert response["pending"][0]["tool"] == "request_change"
-    assert not sent_requests
+    assert not sent_requests  # nothing fired yet
     assert spec in response["pending"][0]["args"]  # user sees the exact spec
 
-    await test_brain.resolve(response["pending"][0]["id"], approve=True)
+    response = await brain.resolve(response["pending"][0]["id"], approve=True)
+    assert response["reply"].startswith("Claude Code started (change)")
     host, _path, body, headers = sent_requests[0]
     assert host == "api.anthropic.com"
     assert json.loads(body)["text"].endswith(spec)
     assert headers["authorization"] == "Bearer rt"
     assert "anthropic-beta" in headers
 
-    await test_brain.check_builds()
-    job = test_brain.store.get(GLOBAL, "builds")[0]
+    await brain.check_builds()
+    job = brain.store.get(GLOBAL, "builds")[0]
     assert job["status"] == "ready"
     assert job["pr"] == 7
     _host, push_path, push_body, push_headers = next(sent for sent in sent_requests if sent[0] == "ntfy.sh")
@@ -328,7 +250,26 @@ async def test_request_change_needs_approval_then_fires_exact_spec(make_brain):
     assert push_headers["click"] == "https://github.com/me/fern/pull/7"
 
     requests_before = len(sent_requests)
-    await test_brain.check_builds()  # already announced: no duplicate push
+    await brain.check_builds()  # already announced: no duplicate push
     assert not any(sent[0] == "ntfy.sh" for sent in sent_requests[requests_before:])
-    expected_notice = "Change ready for review: PR #7: Add TV control (security-review)"
-    assert test_brain.notices_for("phone") == [expected_notice]
+    assert brain.notices_for("phone") == ["Change ready for review: PR #7: Add TV control (security-review)"]
+
+
+async def test_request_change_failure_returns_log_reference(make_brain):
+    brain = await make_brain(
+        lambda request: httpx.Response(503), builder_url="https://api.anthropic.com/v1/fire", builder_token="rt"
+    )
+    model = script(
+        brain,
+        [
+            [function_call("request_change", {"kind": "plan", "spec": "TV control"}, call_id="c1")],
+            [assistant_message("Something went wrong; check the logs.")],
+        ],
+    )
+    pending_id = (await brain.run("plan TV control", session="s10"))["pending"][0]["id"]
+    response = await brain.resolve(pending_id, approve=True)
+    tool_result = json.dumps(model.calls[-1].input)  # errors go back to the model
+    assert "could not start Claude Code (HTTPStatusError)" in tool_result
+    assert "check the fern logs for reference" in tool_result
+    assert response["reply"] == "Something went wrong; check the logs."
+    assert brain.store.get(GLOBAL, "builds", []) == []  # failed request is not tracked as a job
