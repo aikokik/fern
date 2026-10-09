@@ -2,7 +2,7 @@
 
 Two ways to talk to fern:
 - **Voice web app** (conversation mode, interruptible, OpenAI Realtime): open `<address>` in Safari.
-- **Shortcuts** (Siri dictation / Back Tap / Action Button, Apple voice) plus the alarm-stop briefing automation.
+- **Shortcuts** (Siri dictation / Back Tap / Action Button, Apple voice).
 
 ## 1. Make fern reachable from the phone
 
@@ -43,17 +43,6 @@ Shortcuts app → **+** → name it **Fern** → add actions:
 
 Try: "Hey Siri, Fern" → "wake me at 6:30".
 
-## 3. Automation: briefing when the alarm stops
-
-Shortcuts → **Automation** → **+** → **Alarm** → **Is Stopped** → Any → **Run Immediately** → actions:
-
-1. **Get Contents of URL**: `<address>/v1/briefing/audio`, Method **GET**, Header `Authorization` = `Bearer <phone token>`
-2. **Play Sound**: *Contents of URL*
-
-Fallback (Apple voice, no OpenAI TTS): use `/v1/briefing` and **Speak Text** instead.
-
 ## Notes
-- First briefing of the day takes ~30–40 s if it wasn't pre-generated. Alarms set through fern are pre-generated
-  automatically; for alarms set in the Clock app, list your usual times in `FERN_BRIEFING_AT=07:00,08:30`.
-- Approvals (risky actions) come back in `pending`; the voice web app shows them as cards, or approve with
+- Approvals (risky actions) come back in `pending`; the voice web app asks "Approve?" (answer out loud), or approve with
   `POST /v1/approvals/<id>` `{"approve": true}`.

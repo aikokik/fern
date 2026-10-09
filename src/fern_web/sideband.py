@@ -35,6 +35,7 @@ class VoiceSession:
         max_seconds: float,
         idle_seconds: float,
         notice_poll_seconds: float,
+        model_name: str = "realtime",
     ):
         self.session_id = session_id
         self.device_token = device_token
@@ -47,6 +48,7 @@ class VoiceSession:
         self.notice_poll_seconds = notice_poll_seconds
         self.browser_events: asyncio.Queue[dict] = asyncio.Queue()  # streamed to the browser (SSE)
         self.transcript: list[dict] = []
+        self.usage = {"model": model_name, "requests": 0, "input": 0, "cached": 0, "output": 0}
         self.started_at = self.last_activity_at = time.monotonic()
         self.model_is_responding = False
         self.connection: Any = None
@@ -97,9 +99,21 @@ class VoiceSession:
         elif event_type == "response.done":
             self.model_is_responding = False
             self.last_activity_at = time.monotonic()
+            self._add_usage(event.response)
             self._start_tool_calls(event.response)
         elif event_type == "error":
             log.warning("realtime error in %s: %s", self.session_id, getattr(event, "error", event))
+
+    def _add_usage(self, response: Any) -> None:
+        """Voice is the most expensive model per minute: count every response (audio + text tokens)."""
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        input_details = getattr(usage, "input_token_details", None)
+        self.usage["requests"] += 1
+        self.usage["input"] += usage.input_tokens or 0
+        self.usage["cached"] += (getattr(input_details, "cached_tokens", 0) or 0) if input_details else 0
+        self.usage["output"] += usage.output_tokens or 0
 
     def _start_tool_calls(self, response: Any) -> None:
         """Run tool calls only from responses that completed. When the user talks over the model, the response
@@ -279,6 +293,6 @@ class VoiceSession:
         await self.browser_events.put({"type": "end"})
         try:
             duration = time.monotonic() - self.started_at
-            await self.brain.voice_log(self.device_token, duration, self.transcript)
+            await self.brain.voice_log(self.device_token, duration, self.transcript, self.usage)
         except Exception:
             log.warning("voice log failed", exc_info=True)

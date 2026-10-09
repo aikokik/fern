@@ -99,9 +99,10 @@ def voice_session(connection: FakeRealtimeConnection, recorded_calls: list, chat
 
 
 def response_done(status: str, arguments: str, call_id: str = "c1") -> SimpleNamespace:
-    """A Realtime `response.done` event whose output is one ask_fern call."""
+    """A Realtime `response.done` event whose output is one ask_fern call, with token usage."""
     call = SimpleNamespace(type="function_call", name="ask_fern", call_id=call_id, arguments=arguments)
-    return SimpleNamespace(type="response.done", response=SimpleNamespace(status=status, output=[call]))
+    usage = SimpleNamespace(input_tokens=500, output_tokens=40, input_token_details=SimpleNamespace(cached_tokens=200))
+    return SimpleNamespace(type="response.done", response=SimpleNamespace(status=status, output=[call], usage=usage))
 
 
 async def wait_until(condition, timeout_seconds=2.0):
@@ -138,6 +139,7 @@ async def test_tool_call_runs_on_server_channel():
     assert (await session.browser_events.get()) == {"type": "end"}
     voice_log = next(call for call in recorded_calls if call[1] == "/v1/voice-log")[2]
     assert voice_log["transcript"] == [{"role": "user", "text": "unlock the door"}]
+    assert voice_log["usage"] == {"model": "realtime", "requests": 1, "input": 500, "cached": 200, "output": 40}
 
 
 async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain():
@@ -300,6 +302,7 @@ async def test_call_handshake_server_side(web_client):
     assert tool_names == {"ask_fern", "decide_approval", "end_conversation"}
     assert "Sam wakes at 7" in session_config["instructions"]  # personalization
     assert session_config["max_output_tokens"] > 0  # spoken replies are capped
+    assert session_config["truncation"]["token_limits"]["post_instructions"] > 0  # voice context is capped
     assert "connect-src 'self';" in response.headers["content-security-policy"]
 
 

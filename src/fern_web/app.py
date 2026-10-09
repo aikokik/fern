@@ -130,6 +130,7 @@ async def start_voice_call(body: Offer, device_token: str = Depends(bearer_token
         max_seconds=seconds_left,
         idle_seconds=web_settings.idle_seconds,
         notice_poll_seconds=web_settings.notice_poll_seconds,
+        model_name=web_settings.model,
     )
     state.voice_sessions[session_id] = (_hash(device_token), voice_session)
 

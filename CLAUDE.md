@@ -1,17 +1,19 @@
 # fern
 
 Household AI. Two packages, separate containers:
-- `src/fern/`: the **brain**, API only. OpenAI Agents SDK orchestrator (`brain.py`) + `news_desk` subagent, tools, memory,
+- `src/fern/`: the **brain**, API only. OpenAI Agents SDK orchestrator (`brain.py`), tools, memory,
   approvals, scheduler. HTTP API in `server.py`. No UI here.
 - `src/fern_web/`: the **voice interface**. Static page + OpenAI Realtime session minting + a server-side channel that runs
   tool calls by calling the brain's HTTP API. Must never import `fern`.
 
 ## Conventions
-- Tools: `@tool(Tier.READ|ACT|RISKY, group=...)` from `src/fern/core.py`. RISKY = needs human approval. Optional `group`
-  = loaded on demand via `load_tools`. Prefer adding a plugin module (exposes `TOOLS`, optional `GROUPS`) under
+- Tools: `@tool(Tier.READ|ACT|RISKY, group=...)` from `src/fern/core.py`. RISKY = needs human approval. Built-in
+  tools have no `group` (always visible); use `group` only for large plugin tool sets, loaded via `load_tools`.
+- Token budget: action tools (`ACTION_TOOLS` in `brain.py`) end the run with their own output, so return a short,
+  user-ready sentence, or a string starting with `error` to hand the problem back to the model. Prefer adding a plugin module (exposes `TOOLS`, optional `GROUPS`) under
   `src/fern/tools/` and registering it in `src/fern/tools/__init__.py`.
 - Skills: `skills/<name>/SKILL.md` with `name`/`description` frontmatter.
-- External content returned to the model goes through `untrusted(source, text)`.
+- Only build what was asked for: no speculative integrations or "for later" scaffolding.
 - Outbound HTTP uses `FernContext.http` (egress allowlist). New hosts need `FERN_ALLOWED_HOSTS` **and** `deploy/allowlist`.
 - Keep code minimal: no speculative abstractions, match the surrounding style, comments only for non-obvious "why".
 - Names are descriptive: no single-letter or cryptic variables (`settings`, `response`, `event`, `job`, not `s`, `r`,
@@ -25,7 +27,7 @@ Household AI. Two packages, separate containers:
 
 ## Security rules (hard)
 - Never read, print or modify `.env*` or anything under `data/` (secrets, household memory).
-- Never weaken: tool tiers, approval policy, egress allowlists, `deploy/` sandbox settings, reader SSRF checks, auth.
+- Never weaken: tool tiers, approval policy, egress allowlists, `deploy/` sandbox settings, auth.
   If a request truly requires touching these, do the minimum, and say so first in the PR description under **Security**.
 - Never add tools that run shell commands, eval code, or fetch model-chosen URLs from the brain.
 - Never merge; open a PR.

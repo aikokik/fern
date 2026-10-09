@@ -1,4 +1,4 @@
-# brain: no internet route at all (internal network). Out: only via `egress` allowlist (+ `reader` for articles).
+# brain: no internet route at all (internal network). Out: only via `egress` allowlist.
 # In: only via `ingress` -> `web` (voice UI + pass-through to the brain API). The brain publishes no port.
 #   cd deploy && cp ../.env.example .env && docker compose up -d --build
 services:
@@ -8,8 +8,6 @@ services:
     environment:
       HTTPS_PROXY: http://egress:8888
       HTTP_PROXY: http://egress:8888
-      NO_PROXY: reader
-      FERN_READER_URL: http://reader:8080
     volumes: ["../data:/data"]
     networks: [sealed]
     read_only: true
@@ -30,23 +28,12 @@ services:
       FERN_REALTIME_VOICE: ${FERN_REALTIME_VOICE:-marin}
       FERN_VOICE_DAILY_MINUTES: ${FERN_VOICE_DAILY_MINUTES:-30}
       FERN_VOICE_MAX_OUTPUT_TOKENS: ${FERN_VOICE_MAX_OUTPUT_TOKENS:-600}
+      FERN_VOICE_CONTEXT_TOKENS: ${FERN_VOICE_CONTEXT_TOKENS:-4000}
       HTTPS_PROXY: http://egress:8888
       NO_PROXY: brain
     networks: [sealed]
     read_only: true
     tmpfs: ["/tmp:size=16m"]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    mem_limit: 256m
-    pids_limit: 64
-    restart: unless-stopped
-
-  # The only container with open egress. It accepts an HN item id, never a URL, and refuses private IPs.
-  reader:
-    build: { context: .., dockerfile: deploy/Dockerfile }
-    command: ["uvicorn", "fern.reader:app", "--host", "0.0.0.0", "--port", "8080"]
-    networks: [sealed, outside]
-    read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m

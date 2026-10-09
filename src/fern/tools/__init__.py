@@ -1,4 +1,6 @@
-"""Tool registry. Plugins (FERN_PLUGINS=pkg.mod,...) are modules exposing TOOLS and optional GROUPS."""
+"""Tool registry. Built-in tools are always visible: a few extra tool definitions (cached) cost less than an
+extra model call to load them. Plugins (FERN_PLUGINS=pkg.mod,...) expose TOOLS and may put large sets behind
+GROUPS, which the model loads on demand with load_tools."""
 
 import importlib
 from pathlib import Path
@@ -6,7 +8,7 @@ from pathlib import Path
 from agents import RunContextWrapper
 
 from fern.core import TOOL_GROUPS, FernContext, Tier, tool
-from fern.tools import builder, device, home
+from fern.tools import builder, device
 
 
 def skills_index(skills_dir: Path) -> dict[str, str]:
@@ -55,7 +57,7 @@ async def remember(run: RunContextWrapper[FernContext], text: str) -> str:
         text: One self-contained fact, e.g. 'Sam wakes at 07:00 on weekdays'.
     """
     run.context.memory.remember(text[:500])
-    return "saved"
+    return f"Saved: {text[:500]}"
 
 
 @tool(Tier.READ)
@@ -68,8 +70,18 @@ async def recall(run: RunContextWrapper[FernContext], query: str) -> str:
     return "\n".join(run.context.memory.recall(query)) or "nothing found"
 
 
-GROUPS: dict[str, str] = home.GROUPS | builder.GROUPS
-ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *home.TOOLS, *builder.TOOLS]
+GROUPS: dict[str, str] = {}  # filled by plugins
+ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *builder.TOOLS]
+
+
+def active(skills_dir: Path) -> list:
+    """Tools to expose: drop read_skill / load_tools when there's nothing for them to load (saves prompt tokens)."""
+    unusable = set()
+    if not skills_index(skills_dir):
+        unusable.add("read_skill")
+    if not GROUPS:
+        unusable.add("load_tools")
+    return [function for function in ALL if function.name not in unusable]
 
 
 _loaded_plugins: set[str] = set()

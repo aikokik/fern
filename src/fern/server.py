@@ -6,7 +6,7 @@ import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from fern.brain import Brain
@@ -17,17 +17,13 @@ log = logging.getLogger("fern")
 
 
 async def scheduler() -> None:
-    """Proactive work: pre-generate briefings before wake-ups (every minute), follow Claude Code jobs (every 5)."""
-    minute = 0
+    """Proactive work: follow Claude Code jobs to their PRs and announce results (no model calls)."""
     while True:
-        await asyncio.sleep(60)
-        minute += 1
-        for every_minutes, job in ((1, brain.prepare_briefings), (5, brain.check_builds)):
-            if minute % every_minutes == 0:
-                try:
-                    await job()
-                except Exception:
-                    log.exception("%s failed", job.__name__)
+        await asyncio.sleep(300)
+        try:
+            await brain.check_builds()
+        except Exception:
+            log.exception("check_builds failed")
 
 
 @asynccontextmanager
@@ -77,16 +73,6 @@ async def approve(pending_id: str, body: Decision, _: str = Depends(device)) -> 
         raise HTTPException(404) from None  # unknown or expired; don't leak which
 
 
-@app.get("/v1/briefing", response_class=PlainTextResponse)
-async def briefing(device_name: str = Depends(device)) -> str:
-    return (await brain.briefing(device_name))["text"]
-
-
-@app.get("/v1/briefing/audio")
-async def briefing_audio(device_name: str = Depends(device)) -> FileResponse:
-    return FileResponse(await brain.briefing_audio(device_name), media_type="audio/mpeg")
-
-
 @app.get("/healthz", response_class=PlainTextResponse)
 async def healthz() -> str:
     return "ok"
@@ -105,11 +91,12 @@ async def notices(device_name: str = Depends(device)) -> list[str]:
 class VoiceLog(BaseModel):
     seconds: float = Field(ge=0, le=86400)
     transcript: list[dict[str, str]] = Field(default_factory=list, max_length=2000)
+    usage: dict[str, int | str] = Field(default_factory=dict)  # voice model tokens: model, requests, input, ...
 
 
 @app.post("/v1/voice-log", status_code=204)
 async def voice_log(body: VoiceLog, device_name: str = Depends(device)) -> None:
-    brain.voice_log(device_name, body.seconds, body.transcript)
+    brain.voice_log(device_name, body.seconds, body.transcript, body.usage)
 
 
 @app.get("/v1/sessions/{session}/stats")
