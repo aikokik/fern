@@ -3,6 +3,8 @@
 Household AI. Two packages, separate containers:
 - `src/fern/`: the **brain**, API only. OpenAI Agents SDK orchestrator (`brain.py`), tools, memory,
   approvals, scheduler. HTTP API in `server.py`. No UI here.
+- `src/fern_builder/`: the **Claude Code bridge** (`builder` container) and **shipper** (`shipper` container, the only
+  holder of the GitHub token). Must never import `fern` or `fern_web`.
 - `src/fern_web/`: the **voice interface**. Static page + OpenAI Realtime session minting + a server-side channel that runs
   tool calls by calling the brain's HTTP API. Must never import `fern`.
 

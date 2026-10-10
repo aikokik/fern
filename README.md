@@ -31,7 +31,7 @@ cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed; entr
 Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` (used by the web app), and
 `GET /v1/usage` (cost report). **Usage page:** open `/usage` in the web app (same device token).
 
-**Docs:** [iPhone + voice web app](docs/iphone.md) · [Claude Code builder](docs/builder.md) · [always-on hosting](docs/hosting.md)
+**Docs:** [iPhone + voice web app](docs/iphone.md) · [Claude Code builder](docs/builder.md) · [talking to Claude Code](docs/claude-voice.md) · [always-on hosting](docs/hosting.md)
 
 ## Extend
 - **Tool:** `@tool(Tier.READ|ACT|RISKY, group=...)` in a module with `TOOLS` (+ `GROUPS`); `FERN_PLUGINS=my.module`.
