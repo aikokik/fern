@@ -34,6 +34,7 @@ class FernContext:
     device_commands: list[dict] = field(default_factory=list)  # device-side actions (e.g. phone alarm)
     notes: list[str] = field(default_factory=list)  # mid-conversation system notes for next model call
     subagent_runs: list[dict] = field(default_factory=list)  # full subagent trajectories, logged with the parent
+    recorded_usage: dict[str, int] = field(default_factory=dict)  # usage already stored (resumed runs carry it)
 
 
 TOOL_GROUPS: dict[str, str] = {}  # tool name -> deferred group, for load_tools
@@ -41,6 +42,11 @@ TOOL_GROUPS: dict[str, str] = {}  # tool name -> deferred group, for load_tools
 
 class EgressBlockedError(Exception):
     pass
+
+
+def untrusted(source: str, text: str) -> str:
+    """Mark outside content (web pages, documents) as data. The rules tell the model never to obey it."""
+    return f"<untrusted source={source!r}>\n{text}\n</untrusted>"
 
 
 def http_client(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:

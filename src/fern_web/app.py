@@ -101,6 +101,11 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/usage")
+async def usage_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "usage.html")
+
+
 @app.get("/healthz")
 async def healthz() -> JSONResponse:
     brain_ok = await state.brain.healthy()
@@ -131,6 +136,7 @@ async def start_voice_call(body: Offer, device_token: str = Depends(bearer_token
         idle_seconds=web_settings.idle_seconds,
         notice_poll_seconds=web_settings.notice_poll_seconds,
         model_name=web_settings.model,
+        transcribe_model=web_settings.transcribe_model,
     )
     state.voice_sessions[session_id] = (_hash(device_token), voice_session)
 
