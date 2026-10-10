@@ -7,8 +7,12 @@ from dataclasses import replace
 
 import httpx
 import pytest
+from agents import Usage
 from agents.testing import ScriptedModel, assistant_message, function_call
+from openai.types.responses import ResponseFunctionWebSearch
+from openai.types.responses.response_function_web_search import ActionSearch
 
+from fern import costs
 from fern.brain import Brain, trim_history
 from fern.config import Settings
 from fern.core import EgressBlockedError, http_client
@@ -157,18 +161,21 @@ async def test_notices_profile_voice_log_and_usage(brain):
     assert brain.notices_for("ipad") == ["TV control is ready"]
 
     brain.memory.remember("Sam wakes at 07:00")
-    voice_usage = {"model": "gpt-realtime-2.1-mini", "requests": 3, "input": 900, "cached": 300, "output": 400}
-    brain.voice_log("phone", 42.0, [{"role": "user", "text": "hi"}], voice_usage)
+    voice_rows = [
+        {"kind": "voice", "model": "gpt-realtime-2.1-mini", "requests": 3, "input": 900, "cached": 300, "output": 400},
+        {"kind": "brain", "model": "gpt-5.5", "requests": 99},  # the interface can't report brain usage
+    ]
+    brain.voice_log("phone", 42.0, [{"role": "user", "text": "hi"}], voice_rows)
     profile = brain.profile("phone")
     assert profile["facts"] == ["Sam wakes at 07:00"]
     assert profile["voice_seconds_today"] == 42.0
     assert brain.profile("ipad")["voice_seconds_today"] == 0
     assert '"voice": true' in brain.store.trajectories_file.read_text()
 
-    [voice_row] = brain.store.usage_since(time.time() - 60)
-    assert voice_row["model"] == "gpt-realtime-2.1-mini"
+    [voice_row] = brain.store.usage_by_session(time.time() - 60)
+    assert (voice_row["kind"], voice_row["model"]) == ("voice", "gpt-realtime-2.1-mini")
     assert (voice_row["requests"], voice_row["input"], voice_row["output"]) == (3, 900, 400)
-    assert brain.store.usage_since(time.time() + 60) == []  # time window respected
+    assert brain.store.usage_by_session(time.time() + 60) == []  # time window respected
 
 
 async def test_request_change_needs_approval_then_fires_exact_spec(make_brain):
@@ -256,6 +263,130 @@ async def test_request_change_failure_returns_log_reference(make_brain):
     assert "check the fern logs for reference" in tool_result
     assert response["reply"] == "Something went wrong; check the logs."
     assert brain.store.get(GLOBAL, "builds", []) == []  # failed request is not tracked as a job
+
+
+async def test_research_is_isolated_logged_and_untrusted(brain, make_brain):
+    researcher_tools = {type(tool).__name__ for tool in brain.researcher.tools}
+    assert researcher_tools == {"WebSearchTool"}  # no fern actions; file_search only with a vector store
+    with_documents = await make_brain(vector_store_ids=("vs_123",))
+    assert {type(tool).__name__ for tool in with_documents.researcher.tools} == {"WebSearchTool", "FileSearchTool"}
+
+    orchestrator = script(
+        brain,
+        [
+            [function_call("research", {"input": "weather in Lisbon today"}, call_id="c1")],
+            [assistant_message("It's sunny, 18 degrees.")],
+        ],
+    )
+    web_search = ResponseFunctionWebSearch(
+        id="ws_1", status="completed", type="web_search_call", action=ActionSearch(type="search", query="Lisbon")
+    )
+    brain.researcher.model = ScriptedModel([[web_search, assistant_message("Sunny, 18°C (weather.com).")]])
+    response = await brain.run("what's the weather in Lisbon?", session="s11")
+    assert response["reply"] == "It's sunny, 18 degrees."
+    assert "<untrusted source='research'>" in json.dumps(orchestrator.calls[1].input)
+
+    record = json.loads(brain.store.trajectories_file.read_text().splitlines()[-1])
+    [research_run] = record["subagent_runs"]
+    assert research_run["agent"] == "research"
+    assert research_run["hosted_calls"] == {"web_search_call": 1}
+    assert research_run["output"] == "Sunny, 18°C (weather.com)."
+
+
+def usage_of(requests: int, input_tokens: int, output_tokens: int) -> Usage:
+    return Usage(
+        requests=requests,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+    )
+
+
+def rows_by_kind(brain: Brain) -> dict:
+    return {row["kind"]: row for row in brain.store.usage_by_session()}
+
+
+async def test_usage_is_split_between_brain_subagent_and_hosted_tools(brain):
+    orchestrator = script(
+        brain,
+        [
+            [function_call("research", {"input": "weather"}, call_id="c1")],
+            [assistant_message("Sunny.")],
+        ],
+    )
+    orchestrator.set_default_usage(usage_of(1, 100, 5))
+    web_search = ResponseFunctionWebSearch(
+        id="ws_1", status="completed", type="web_search_call", action=ActionSearch(type="search", query="weather")
+    )
+    brain.researcher.model = ScriptedModel(
+        [[web_search, assistant_message("Sunny.")]], default_usage=usage_of(1, 1000, 50)
+    )
+    await brain.run("weather?", session="s12")
+
+    rows = rows_by_kind(brain)
+    assert (rows["brain"]["requests"], rows["brain"]["input"], rows["brain"]["output"]) == (2, 200, 10)
+    assert rows["brain"]["max_input"] == 100  # the subagent's 1000-token call isn't counted as brain context
+    assert (rows["subagent"]["requests"], rows["subagent"]["input"], rows["subagent"]["max_input"]) == (1, 1000, 1000)
+    assert (rows["tool"]["model"], rows["tool"]["requests"]) == ("web_search_call", 1)
+
+
+async def test_resumed_run_is_not_counted_twice(make_brain):
+    brain = await make_brain(
+        lambda request: httpx.Response(503), builder_url="https://api.anthropic.com/v1/fire", builder_token="rt"
+    )
+    model = script(
+        brain,
+        [
+            [function_call("request_change", {"kind": "plan", "spec": "TV"}, call_id="c1")],
+            [assistant_message("It failed.")],
+        ],
+    )
+    model.set_default_usage(usage_of(1, 100, 5))
+    pending_id = (await brain.run("plan TV", session="s13"))["pending"][0]["id"]
+    await brain.resolve(pending_id, approve=True)
+    assert rows_by_kind(brain)["brain"]["requests"] == 2  # 1 before the pause + 1 after, not 1 + 2
+
+
+def test_costs_price_audio_text_tools_and_flag_unknown_models():
+    zero = dict.fromkeys(("requests", "input", "cached", "output", "audio_input", "audio_cached", "audio_output"), 0)
+    brain_call = zero | {"requests": 1, "input": 1_000_000, "cached": 500_000, "output": 100_000}
+    assert costs.cost("gpt-5.5-2026-09-01", brain_call) == 0.5 * 5.00 + 0.5 * 0.50 + 0.1 * 30.00  # snapshot -> base
+    voice = zero | {"input": 1_000_000, "audio_input": 1_000_000, "output": 1_000_000, "audio_output": 1_000_000}
+    assert costs.cost("gpt-realtime-2.1-mini", voice) == 10.00 + 20.00  # audio priced, not text
+    assert costs.cost("web_search_call", zero | {"requests": 3}) == 0.03
+    assert costs.cost("some-new-model", brain_call) is None
+
+    rows = [
+        zero
+        | brain_call
+        | {"session": "phone-main", "kind": "brain", "model": "gpt-5.5", "max_input": 9000, "last_used": 2.0},
+        zero
+        | {
+            "session": "phone-main",
+            "kind": "tool",
+            "model": "web_search_call",
+            "requests": 2,
+            "max_input": 0,
+            "last_used": 1.0,
+        },
+        zero
+        | {
+            "session": "cli-x",
+            "kind": "brain",
+            "model": "mystery",
+            "requests": 1,
+            "input": 10,
+            "max_input": 10,
+            "last_used": 3.0,
+        },
+    ]
+    report = costs.build_report(rows)
+    assert report["unpriced_models"] == ["mystery"]
+    assert [session["session"] for session in report["sessions"]] == ["cli-x", "phone-main"]  # newest first
+    phone = report["sessions"][1]
+    assert phone["parts"]["tool"] == {"calls": 2, "tokens": 0, "cost": 0.02}
+    assert phone["max_context"] == 9000
+    assert report["totals"]["calls"] == 4
 
 
 async def test_failure_logs_never_contain_urls_tokens_or_topics(make_brain, caplog):

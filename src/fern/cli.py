@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 
+from fern import costs
 from fern.brain import Brain
 from fern.config import settings
 from fern.store import Store
@@ -48,16 +49,15 @@ async def chat() -> None:
 
 
 def print_usage_report(days: float) -> None:
-    """Tokens per model (brain + voice) over the last `days`, highest output first."""
-    rows = Store(settings).usage_since(time.time() - days * 86400)
-    print(f"{'model':<26}{'requests':>10}{'input':>12}{'cached':>12}{'output':>10}{'cache hit':>11}")
-    for row in rows:
-        print(
-            f"{row['model']:<26}{row['requests']:>10}{row['input']:>12}{row['cached']:>12}"
-            f"{row['output']:>10}{row['cache_hit']:>11.0%}"
-        )
-    if not rows:
-        print(f"no usage recorded in the last {days:g} days")
+    """Cost, calls and tokens per part (voice, transcription, brain, subagents, tools) over the last `days`."""
+    report = costs.build_report(Store(settings).usage_by_session(time.time() - days * 86400))
+    print(f"{'part':<16}{'calls':>8}{'tokens':>12}{'cost':>12}")
+    for part, totals in report["totals"]["parts"].items():
+        print(f"{part:<16}{totals['calls']:>8}{totals['tokens']:>12}{'$' + format(totals['cost'], '.4f'):>12}")
+    total = report["totals"]
+    print(f"{'total':<16}{total['calls']:>8}{total['tokens']:>12}{'$' + format(total['cost'], '.4f'):>12}")
+    if report["unpriced_models"]:
+        print(f"no price for: {', '.join(report['unpriced_models'])} (add it to fern/costs.py)")
 
 
 def main() -> None:

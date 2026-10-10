@@ -101,7 +101,14 @@ def voice_session(connection: FakeRealtimeConnection, recorded_calls: list, chat
 def response_done(status: str, arguments: str, call_id: str = "c1") -> SimpleNamespace:
     """A Realtime `response.done` event whose output is one ask_fern call, with token usage."""
     call = SimpleNamespace(type="function_call", name="ask_fern", call_id=call_id, arguments=arguments)
-    usage = SimpleNamespace(input_tokens=500, output_tokens=40, input_token_details=SimpleNamespace(cached_tokens=200))
+    usage = SimpleNamespace(
+        input_tokens=500,
+        output_tokens=40,
+        input_token_details=SimpleNamespace(
+            cached_tokens=200, audio_tokens=300, cached_tokens_details=SimpleNamespace(audio_tokens=100)
+        ),
+        output_token_details=SimpleNamespace(audio_tokens=30),
+    )
     return SimpleNamespace(type="response.done", response=SimpleNamespace(status=status, output=[call], usage=usage))
 
 
@@ -139,7 +146,12 @@ async def test_tool_call_runs_on_server_channel():
     assert (await session.browser_events.get()) == {"type": "end"}
     voice_log = next(call for call in recorded_calls if call[1] == "/v1/voice-log")[2]
     assert voice_log["transcript"] == [{"role": "user", "text": "unlock the door"}]
-    assert voice_log["usage"] == {"model": "realtime", "requests": 1, "input": 500, "cached": 200, "output": 40}
+    voice_usage, transcription_usage = voice_log["usage"]
+    assert voice_usage == {
+        "kind": "voice", "model": "realtime", "requests": 1, "input": 500, "cached": 200, "output": 40,
+        "audio_input": 300, "audio_cached": 100, "audio_output": 30, "max_input": 500,
+    }  # fmt: skip
+    assert transcription_usage["kind"] == "transcription"
 
 
 async def test_interrupted_or_malformed_tool_calls_never_reach_the_brain(caplog):
