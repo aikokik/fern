@@ -11,6 +11,7 @@ import pytest
 from fern_web import app as web
 from fern_web.brain_client import BrainClient
 from fern_web.claude_client import ClaudeClient
+from fern_web.claude_mode import ClaudeMode, summary
 from fern_web.sideband import VoiceSession
 
 DEVICE_TOKEN = "t" * 32
@@ -181,8 +182,10 @@ async def test_tool_call_runs_on_server_channel():
     assert connection.sent[1] == {"type": "response.create"}
     assert ("POST", "/v1/chat", {"text": "unlock the door", "session": "voice"}) in recorded_calls
     alarm = {"type": "alarm.set", "time": "07:00", "label": ""}
-    assert await session.browser_events.get() == {"type": "command", "command": alarm}
-    assert (await session.browser_events.get())["type"] == "pending"
+    events = browser_events(session)
+    assert [event["type"] for event in events] == ["working", "working", "command", "pending"]
+    assert events[0] == {"type": "working", "by": "fern"}  # the screen shows fern's brain is on it
+    assert events[2] == {"type": "command", "command": alarm}
 
     await session.close()
     await run_task
@@ -223,8 +226,7 @@ async def test_brain_failure_is_reported_with_a_log_reference():
     await wait_until(lambda: len(connection.sent) >= 2)
 
     output = connection.sent[0]["item"]["output"]
-    error_card = await session.browser_events.get()
-    assert error_card["type"] == "error"
+    error_card = next(event for event in browser_events(session) if event["type"] == "error")
     assert error_card["reference"] in output  # same reference spoken, shown and logged
     assert "check the fern logs" in output
     await session.close()
@@ -448,10 +450,17 @@ async def test_claude_reply_goes_to_screen_and_spoken_options_resolve():
 
     output = await call_tool(connection, "ask_claude", {"request": "add a weather tool"}, "c2")
     assert output == (
-        "Say only this: Two ways to do it. Then ask: Which source? Option 1: Open-Meteo. Option 2: Weather.gov."
+        "Say only this: Two ways to do it. Details are on screen. "
+        "Then ask: Which source? Option 1: Open-Meteo. Option 2: Weather.gov."
     )
     assert ("POST", "/topics/weather tool/turn", {"text": "add a weather tool"}) in bridge_requests
-    panel_update = next(event for event in browser_events(session) if event["type"] == "claude_reply")
+    events = browser_events(session)
+    assert [event for event in events if event["type"] == "working"] == [
+        {"type": "working", "by": "claude"},
+        {"type": "working", "by": ""},
+    ]
+    panel_update = next(event for event in events if event["type"] == "claude_reply")
+    assert panel_update["say"] == "Two ways to do it."
     assert panel_update["markdown"].startswith("## Plan")
     assert panel_update["question"]["options"] == ["Open-Meteo", "Weather.gov"]
 
@@ -522,5 +531,16 @@ async def test_tapped_option_goes_to_claude(web_client):
 
     response = await client.post("/realtime/claude", json=answer, headers=AUTHORIZED)
     assert response.status_code == 202
-    panel_update = await asyncio.wait_for(session.browser_events.get(), 2)
-    assert panel_update["type"] == "claude_reply"
+    await wait_until(lambda: session.claude.last_question is not None)  # Claude's reply reached the session
+
+
+def test_voice_speaks_a_summary_and_the_screen_gets_everything():
+    long_say = "First point is short. " + "Then a very long explanation. " * 20
+    long_options = ["Use a small local model that runs on the Mac", "Call the hosted forecast API every hour"]
+    reply = {"say": long_say, "question": {"text": "Which one?", "options": long_options}}
+    spoken = ClaudeMode.__new__(ClaudeMode)._spoken(reply)
+
+    assert len(spoken) < 400
+    assert spoken.endswith("Then ask: Which one? 2 options are on screen; answer with a number.")
+    assert "Details are on screen." in spoken
+    assert summary(long_say).endswith(".")

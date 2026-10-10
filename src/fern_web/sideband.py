@@ -10,7 +10,7 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
@@ -202,7 +202,7 @@ class VoiceSession:
 
     async def _ask_fern(self, call_id: str, request: str) -> None:
         try:
-            async with self._brain_lock:
+            async with self._brain_lock, self.handling("fern"):
                 brain_response = await self.brain.chat(self.device_token, request)
         except Exception as error:
             reference = secrets.token_hex(3)
@@ -294,6 +294,15 @@ class VoiceSession:
             }
         )
         await self.connection.send({"type": "response.create"})
+
+    @contextlib.asynccontextmanager
+    async def handling(self, handler: str) -> AsyncIterator[None]:
+        """Show who is working on the turn (fern's brain or Claude) while it runs."""
+        await self.browser_events.put({"type": "working", "by": handler})
+        try:
+            yield
+        finally:
+            await self.browser_events.put({"type": "working", "by": ""})
 
     async def update_instructions(self, instructions: str) -> None:
         """Switching fern <-> Claude: same voice and call, different role."""

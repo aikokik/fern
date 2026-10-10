@@ -48,6 +48,9 @@ body[data-state="connecting"] #mic { opacity: .6; }
 #claude-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 #log p { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; max-width: 85%; }
 #log .you { background: var(--card); margin-left: auto; }
+#log small { display: block; font-size: .7rem; color: var(--muted); }
+#claude-say { font-weight: 500; }
+#claude-say:empty { display: none; }
 #log .fern { border: 1px solid var(--line); }
 
 /* usage page */

@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from fern_web.sideband import VoiceSession
 
 log = logging.getLogger("fern_web")
+SPOKEN_CHARS = 240  # voice tokens are the costly part: speak a summary, the screen gets everything
+SPOKEN_OPTION_CHARS = 40
 CLAUDE_TOOLS = {"switch_backend", "ask_claude", "claude_action"}
 OPTION_WORDS = {"one": 1, "first": 1, "two": 2, "second": 2, "three": 3, "third": 3, "four": 4, "fourth": 4}
 OPTION_ANSWER = re.compile(
@@ -130,7 +132,7 @@ class ClaudeMode:
         if self._lock.locked():  # e.g. a build that takes minutes: answer now instead of queueing
             return {"say": "Claude is still working on the previous request. Try again when it's done."}
         try:
-            async with self._lock:
+            async with self._lock, self.session.handling("claude"):
                 reply = await request()
         except Exception as error:
             reference = secrets.token_hex(3)
@@ -144,7 +146,12 @@ class ClaudeMode:
     async def _publish(self, reply: dict) -> None:
         """One panel update per reply: new markdown (if any) and the current question (None clears the old one)."""
         self.last_question = reply.get("question") or None
-        panel_update = {"type": "claude_reply", "markdown": reply.get("show") or "", "question": self.last_question}
+        panel_update = {
+            "type": "claude_reply",
+            "say": reply.get("say") or "",
+            "markdown": reply.get("show") or "",
+            "question": self.last_question,
+        }
         await self.session.browser_events.put(panel_update)
         if reply.get("pr_url"):
             await self.session.browser_events.put(
@@ -154,8 +161,24 @@ class ClaudeMode:
     def _spoken(self, reply: dict) -> str:
         if reply.get("status") == "shipped":
             return "Say: shipped, the pull request link is on screen."
-        spoken = reply.get("say") or "Done, details are on screen."
+        say = reply.get("say") or ""
+        spoken = summary(say) or "Done."
+        if spoken != say or reply.get("show"):
+            spoken += " Details are on screen."
         if question := reply.get("question"):
-            options = " ".join(f"Option {number}: {label}." for number, label in enumerate(question["options"], 1))
-            spoken += f" Then ask: {question['text']} {options}"
+            labels = question["options"]
+            if all(len(label) <= SPOKEN_OPTION_CHARS for label in labels):
+                options = " ".join(f"Option {number}: {label}." for number, label in enumerate(labels, 1))
+            else:
+                options = f"{len(labels)} options are on screen; answer with a number."
+            spoken += f" Then ask: {summary(question['text'])} {options}"
         return f"Say only this: {spoken}"
+
+
+def summary(text: str) -> str:
+    """Whole sentences up to SPOKEN_CHARS (the full text is on screen)."""
+    if len(text) <= SPOKEN_CHARS:
+        return text
+    head = text[:SPOKEN_CHARS]
+    sentence_end = max(head.rfind(". "), head.rfind("? "), head.rfind("! "))
+    return head[: sentence_end + 1] if sentence_end > 0 else head.rsplit(" ", 1)[0] + "…"

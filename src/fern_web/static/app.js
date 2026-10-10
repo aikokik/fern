@@ -4,6 +4,7 @@ let deviceToken = localStorage.getItem("fern-token") || "";
 let peerConnection = null;
 let microphone = null;
 let sessionId = null;
+let talkingTo = "fern";  // who answers in the voice: fern, or Claude (relayed by the same voice)
 
 const api = (path, body) => fetch(path, {
   method: body === undefined ? "GET" : "POST",
@@ -21,7 +22,9 @@ function addCaption(speaker, text) {
   if (!text) return;
   const caption = document.createElement("p");
   caption.className = speaker;
-  caption.textContent = text;
+  const label = document.createElement("small");
+  label.textContent = speaker === "you" ? `you → ${talkingTo}` : talkingTo;
+  caption.append(label, text);
   element("#log").prepend(caption);
 }
 
@@ -98,22 +101,32 @@ function onFernEvent(event) {
   else if (event.type === "error") addCard("Something went wrong", `${event.message} · check fern logs for ref ${event.reference}`);
   else if (event.type === "command" && event.command.type === "alarm.set") showAlarmCard(event.command);
   else if (event.type === "mode") showMode(event);
+  else if (event.type === "working") showWorking(event.by);
   else if (event.type === "claude_reply") showClaudeReply(event);
   else if (event.type === "claude_link") addClaudeLink(event);
 }
 
+function showWorking(handler) {
+  if (!sessionId) return;
+  const working = { fern: "fern's brain is working…", claude: "Claude is thinking…" }[handler];
+  setState("live", working || "Listening…");
+}
+
 function showMode(event) {
+  talkingTo = event.mode === "claude" ? "Claude" : "fern";
   const talkingToClaude = event.mode === "claude";
   element("#mode").hidden = !talkingToClaude;
   element("#mode").textContent = talkingToClaude ? `Claude · ${event.topic}` : "";
   element("#claude-question").replaceChildren();  // only answerable while talking to Claude
   if (!talkingToClaude) return;  // keep the last plan and links readable after switching back
+  element("#claude-say").textContent = "";
   element("#claude-plan").replaceChildren();
   element("#claude-links").replaceChildren();
   element("#claude-panel").hidden = false;
 }
 
 function showClaudeReply(reply) {
+  element("#claude-say").textContent = reply.say;  // the voice only speaks a summary of this
   if (reply.markdown) renderMarkdown(element("#claude-plan"), reply.markdown);
   const questionBox = element("#claude-question");
   questionBox.replaceChildren();
