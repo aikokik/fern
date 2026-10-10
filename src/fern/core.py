@@ -44,6 +44,16 @@ class EgressBlockedError(Exception):
     pass
 
 
+def describe_http_error(error: Exception) -> str:
+    """Log-safe summary of an outbound request failure. httpx errors embed the full URL, which can carry
+    secrets (the ntfy topic, routine ids), so keep only the status, the blocked host, or the error type."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"HTTP {error.response.status_code}"
+    if isinstance(error, EgressBlockedError):
+        return str(error)  # "egress to <host> not allowed": the host only
+    return type(error).__name__
+
+
 def untrusted(source: str, text: str) -> str:
     """Mark outside content (web pages, documents) as data. The rules tell the model never to obey it."""
     return f"<untrusted source={source!r}>\n{text}\n</untrusted>"

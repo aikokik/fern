@@ -16,6 +16,7 @@ from fern import costs
 from fern.brain import Brain, trim_history
 from fern.config import Settings
 from fern.core import EgressBlockedError, http_client
+from fern.notify import push
 from fern.store import GLOBAL
 
 BUILDER = {"builder_url": "https://api.anthropic.com/v1/fire", "builder_token": "rt"}
@@ -386,3 +387,29 @@ def test_costs_price_audio_text_tools_and_flag_unknown_models():
     assert phone["parts"]["tool"] == {"calls": 2, "tokens": 0, "cost": 0.02}
     assert phone["max_context"] == 9000
     assert report["totals"]["calls"] == 4
+
+
+async def test_failure_logs_never_contain_urls_tokens_or_topics(make_brain, caplog):
+    brain = await make_brain(
+        lambda request: httpx.Response(503),
+        builder_url="https://api.anthropic.com/v1/claude_code/routines/trig_secret/fire",
+        builder_token="sk-ant-secret",
+        ntfy_topic="fern-secret-topic",
+    )
+    script(
+        brain,
+        [
+            [function_call("request_change", {"kind": "plan", "spec": "TV"}, call_id="c1")],
+            [assistant_message("It failed.")],
+        ],
+    )
+    pending_id = (await brain.run("plan TV", session="s14"))["pending"][0]["id"]
+    await brain.resolve(pending_id, approve=True)
+    await push(brain.http, brain.settings, "title", "message")
+
+    logged = caplog.text
+    assert "request_change failed" in logged
+    assert "HTTP 503" in logged
+    assert "push failed: HTTP 503" in logged
+    for secret in ("trig_secret", "sk-ant-secret", "fern-secret-topic", "https://"):
+        assert secret not in logged
