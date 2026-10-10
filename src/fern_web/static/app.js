@@ -1,4 +1,4 @@
-// fern voice client: microphone + speaker over WebRTC, captions, approval cards. No tool logic lives here.
+// fern voice client: microphone + speaker over WebRTC, captions, approval cards, Claude panel. No tool logic here.
 const element = (selector) => document.querySelector(selector);
 let deviceToken = localStorage.getItem("fern-token") || "";
 let peerConnection = null;
@@ -60,6 +60,7 @@ function stop(statusText = "Tap to talk") {
   peerConnection?.close();
   peerConnection = null;
   microphone = null;
+  showMode({ mode: "fern" });
   setState("idle", statusText);
 }
 
@@ -96,6 +97,93 @@ function onFernEvent(event) {
   else if (event.type === "resolved") resolveApprovalCards(event.approved);
   else if (event.type === "error") addCard("Something went wrong", `${event.message} · check fern logs for ref ${event.reference}`);
   else if (event.type === "command" && event.command.type === "alarm.set") showAlarmCard(event.command);
+  else if (event.type === "mode") showMode(event);
+  else if (event.type === "claude_reply") showClaudeReply(event);
+  else if (event.type === "claude_link") addClaudeLink(event);
+}
+
+function showMode(event) {
+  const talkingToClaude = event.mode === "claude";
+  element("#mode").hidden = !talkingToClaude;
+  element("#mode").textContent = talkingToClaude ? `Claude · ${event.topic}` : "";
+  element("#claude-question").replaceChildren();  // only answerable while talking to Claude
+  if (!talkingToClaude) return;  // keep the last plan and links readable after switching back
+  element("#claude-plan").replaceChildren();
+  element("#claude-links").replaceChildren();
+  element("#claude-panel").hidden = false;
+}
+
+function showClaudeReply(reply) {
+  if (reply.markdown) renderMarkdown(element("#claude-plan"), reply.markdown);
+  const questionBox = element("#claude-question");
+  questionBox.replaceChildren();
+  if (!reply.question) return;
+  const prompt = document.createElement("p");
+  prompt.textContent = reply.question.text;
+  const buttons = document.createElement("div");
+  buttons.className = "option-buttons";
+  reply.question.options.forEach((label, index) => {
+    const button = document.createElement("button");
+    button.className = "ghost";
+    button.textContent = `${index + 1}. ${label}`;
+    button.onclick = async () => {
+      buttons.remove();
+      const response = await api("/realtime/claude", { session_id: sessionId, text: `option ${index + 1}` });
+      prompt.textContent += response.ok ? ` → ${label}` : " (couldn't send, answer by voice)";
+    };
+    buttons.append(button);
+  });
+  questionBox.append(prompt, buttons);
+}
+
+function addClaudeLink(event) {
+  if (!event.url.startsWith("https://")) return;
+  const link = document.createElement("a");
+  link.className = "button";
+  link.href = event.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = event.label;
+  element("#claude-links").append(link);
+}
+
+// Small markdown subset (headings, lists, code blocks, **bold**, `code`). Built with textContent only: Claude's
+// text never becomes HTML.
+function renderMarkdown(container, markdown) {
+  container.replaceChildren();
+  let list = null;
+  let codeBlock = null;
+  for (const line of markdown.split("\n")) {
+    if (line.trimStart().startsWith("```")) {
+      codeBlock = codeBlock ? null : container.appendChild(document.createElement("pre"));
+      list = null;
+      continue;
+    }
+    if (codeBlock) { codeBlock.textContent += `${line}\n`; continue; }
+    const heading = line.match(/^#{1,4}\s+(.*)/);
+    const listItem = line.match(/^\s*([-*]|\d+\.)\s+(.*)/);
+    if (listItem) {
+      const listType = listItem[1].endsWith(".") ? "OL" : "UL";
+      if (list?.tagName !== listType) list = container.appendChild(document.createElement(listType));
+      appendInline(list.appendChild(document.createElement("li")), listItem[2]);
+      continue;
+    }
+    list = null;
+    if (heading) appendInline(container.appendChild(document.createElement("h3")), heading[1]);
+    else if (line.trim()) appendInline(container.appendChild(document.createElement("p")), line);
+  }
+}
+
+function appendInline(parent, text) {
+  for (const part of text.split(/(\*\*[^*]+\*\*|`[^`]+`)/)) {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      parent.appendChild(document.createElement("strong")).textContent = part.slice(2, -2);
+    } else if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      parent.appendChild(document.createElement("code")).textContent = part.slice(1, -1);
+    } else if (part) {
+      parent.append(part);
+    }
+  }
 }
 
 function addCard(title, detail) {

@@ -36,6 +36,16 @@ body[data-state="connecting"] #mic { opacity: .6; }
 #cards h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 4px; }
 #cards p { margin: 0 0 10px; overflow-wrap: anywhere; }
 #cards div { display: flex; gap: 8px; }
+.badge { font-size: .8rem; padding: .2rem .7rem; border-radius: 999px; background: var(--accent); color: var(--bg); }
+#claude-panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 4px 14px 12px; margin-bottom: 10px; }
+#claude-panel h3 { font-size: 1rem; margin: 12px 0 4px; }
+#claude-panel p, #claude-panel li { overflow-wrap: anywhere; }
+#claude-panel pre { overflow-x: auto; background: var(--bg); padding: 10px; border-radius: 10px; font-size: .85rem; }
+#claude-panel code { font-size: .9em; }
+#claude-question { border-top: 1px solid var(--line); margin-top: 10px; }
+#claude-question:empty { display: none; }
+.option-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+#claude-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 #log p { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; max-width: 85%; }
 #log .you { background: var(--card); margin-left: auto; }
 #log .fern { border: 1px solid var(--line); }

@@ -3,8 +3,22 @@
 fern's voice can hand the conversation to Claude Code: plan a feature by voice (long text on screen), have it
 built, try it, and ship a PR. Claude runs on **your Pro/Max plan** (Claude Code CLI), inside fern's sandbox.
 
-Status: **phase 1 of 4** (builder + shipper services). Voice switching (phase 2), preview (phase 3) and usage
+Status: **phase 2 of 4** (builder + shipper, voice switching + screen panel). Preview (phase 3) and usage
 (phase 4) come next.
+
+## Talking to Claude
+| Say | What happens |
+|---|---|
+| "switch to Claude about weather tool" | Same voice, now relaying to Claude Code for topic `weather tool` (asks for a topic if you didn't name one) |
+| anything else | Sent to Claude. It answers in a sentence or two; plans and details appear in the **Claude panel** on screen |
+| "option 2" / "the first one" (or tap it) | Answers Claude's on-screen question |
+| "build it" | Claude implements the agreed plan and runs tests + lint (can take minutes; the session stays open) |
+| "ship it" | Commit, push `claude/<topic>`, open the PR; the link shows in the panel |
+| "list topics" / "continue weather tool" | See resumable topics / pick one up again |
+| "back to fern" | fern's own tools again; the panel stays readable |
+
+While talking to Claude, fern's tools (alarms, memory, approvals) are off; say "back to fern" first.
+One Claude request runs at a time per session; asking again during a build gets "still working".
 
 ## How it's isolated
 | Container | Has | Doesn't have |
@@ -28,10 +42,11 @@ Status: **phase 1 of 4** (builder + shipper services). Voice switching (phase 2)
    FERN_BRIDGE_TOKEN=…
    FERN_SHIPPER_TOKEN=…
    FERN_CLAUDE_MODEL=sonnet
+   FERN_CLAUDE_DEVICES=phone          # optional: device names allowed to switch to Claude (empty = all)
    ```
 4. `cp .env deploy/.env && cd deploy && FERN_BIND=0.0.0.0 docker compose up -d --build`
 
-## Bridge API (used by fern's web app in phase 2)
+## Bridge API (used by fern's web app)
 `Authorization: Bearer $FERN_BRIDGE_TOKEN`, reachable only inside the sealed network at `http://builder:8770`.
 
 | Call | Does |

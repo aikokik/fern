@@ -10,11 +10,13 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 from fern_web.brain_client import BrainClient, BrainError
+from fern_web.claude_client import ClaudeClient
+from fern_web.claude_mode import CLAUDE_TOOLS, ClaudeMode
 
 log = logging.getLogger("fern_web")
 GOODBYE_SECONDS = 3  # let the spoken goodbye finish before hanging up
@@ -37,6 +39,10 @@ class VoiceSession:
         notice_poll_seconds: float,
         model_name: str = "realtime",
         transcribe_model: str = "transcribe",
+        claude: ClaudeClient | None = None,
+        device_name: str = "",
+        claude_devices: tuple[str, ...] = (),
+        household_facts: str = "",
     ):
         self.session_id = session_id
         self.device_token = device_token
@@ -64,6 +70,8 @@ class VoiceSession:
         self.user_spoke_at = 0.0
         self._user_spoke = asyncio.Event()
         self.task: asyncio.Task | None = None  # set by whoever starts run()
+        claude_client = claude or ClaudeClient("", "")
+        self.claude = ClaudeMode(self, claude_client, device_name, claude_devices, household_facts)
 
     async def run(self) -> None:
         background_tasks: list[asyncio.Task] = []
@@ -156,29 +164,41 @@ class VoiceSession:
             return
         for call in function_calls:
             # Background task so session events keep flowing while the brain works.
-            task = asyncio.create_task(self._run_tool(call.name, call.call_id, call.arguments))
-            self._tool_tasks.add(task)
-            task.add_done_callback(self._tool_tasks.discard)
+            self.run_in_background(self._run_tool(call.name, call.call_id, call.arguments))
+
+    def run_in_background(self, work: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(work)
+        self._tool_tasks.add(task)
+        task.add_done_callback(self._tool_tasks.discard)
+
+    def answer_claude_from_screen(self, text: str) -> None:
+        """A tapped option: counts as the user talking, and the reply is spoken like a tool result."""
+        self.last_activity_at = time.monotonic()
+        self.run_in_background(self.claude.answer_from_screen(text))
 
     async def _run_tool(self, name: str, call_id: str, arguments: str) -> None:
         try:
             parsed_arguments = json.loads(arguments or "{}")
         except json.JSONDecodeError:
             log.warning("%s got malformed arguments (%d chars)", name, len(arguments or ""))  # not the user's words
-            await self._send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
+            await self.send_tool_output(call_id, "The request was cut off. Ask the user to repeat it.")
             return
-        if name == "ask_fern":
+        if name in CLAUDE_TOOLS:
+            await self.claude.handle(name, call_id, parsed_arguments)
+        elif name == "ask_fern" and self.claude.active:
+            await self.send_tool_output(call_id, "You're talking to Claude Code now. Use ask_claude, or switch back.")
+        elif name == "ask_fern":
             await self._ask_fern(call_id, parsed_arguments.get("request", ""))
         elif name == "decide_approval":
             await self._decide_approval(call_id, bool(parsed_arguments.get("approve")))
         elif name == "end_conversation":
             # No new response: the model already said its goodbye in the turn that called this tool.
-            await self._send_tool_output(call_id, "ok", respond=False)
+            await self.send_tool_output(call_id, "ok", respond=False)
             await asyncio.sleep(GOODBYE_SECONDS)
             self.closed.set()
             await self.close()
         else:
-            await self._send_tool_output(call_id, f"unknown tool {name}")
+            await self.send_tool_output(call_id, f"unknown tool {name}")
 
     async def _ask_fern(self, call_id: str, request: str) -> None:
         try:
@@ -188,7 +208,7 @@ class VoiceSession:
             reference = secrets.token_hex(3)
             log.exception("ask_fern failed [ref %s]", reference)
             await self.browser_events.put({"type": "error", "message": type(error).__name__, "reference": reference})
-            await self._send_tool_output(
+            await self.send_tool_output(
                 call_id,
                 f"Failed: the request did not reach fern ({type(error).__name__}). Tell the user something went "
                 f"wrong and to check the fern logs for reference {reference}.",
@@ -196,15 +216,15 @@ class VoiceSession:
             return
         log.info("ask_fern: tools=%s pending=%d", brain_response.get("tools"), len(brain_response.get("pending", [])))
         await self.publish(brain_response)
-        await self._send_tool_output(call_id, self._describe(brain_response))
+        await self.send_tool_output(call_id, self._describe(brain_response))
 
     async def _decide_approval(self, call_id: str, approve: bool) -> None:
         if not self.awaiting_approval:
-            await self._send_tool_output(call_id, "Nothing is waiting for approval.")
+            await self.send_tool_output(call_id, "Nothing is waiting for approval.")
             return
         if approve and not await self._user_said_yes():
             log.info("voice approval refused: no clear spoken yes")
-            await self._send_tool_output(call_id, "Not approved: the user must say yes out loud. Ask them again.")
+            await self.send_tool_output(call_id, "Not approved: the user must say yes out loud. Ask them again.")
             return
         replies = []
         for pending in self.awaiting_approval:
@@ -218,7 +238,7 @@ class VoiceSession:
         self.awaiting_approval = []
         await self.browser_events.put({"type": "resolved", "approved": approve})
         verdict = "Approved." if approve else "Rejected."
-        await self._send_tool_output(call_id, f"{verdict} {' '.join(replies)}")
+        await self.send_tool_output(call_id, f"{verdict} {' '.join(replies)}")
 
     async def _user_said_yes(self) -> bool:
         """Approval is tied to the user's real transcribed speech after the question, never the model's say-so,
@@ -275,7 +295,14 @@ class VoiceSession:
         )
         await self.connection.send({"type": "response.create"})
 
-    async def _send_tool_output(self, call_id: str, output: str, respond: bool = True) -> None:
+    async def update_instructions(self, instructions: str) -> None:
+        """Switching fern <-> Claude: same voice and call, different role."""
+        if self.connection is not None and not self.closed.is_set():
+            await self.connection.send(
+                {"type": "session.update", "session": {"type": "realtime", "instructions": instructions}}
+            )
+
+    async def send_tool_output(self, call_id: str, output: str, respond: bool = True) -> None:
         if not await self._wait_for_pause():
             return
         await self.connection.send(
@@ -296,7 +323,8 @@ class VoiceSession:
             await asyncio.sleep(1)
             now = time.monotonic()
             over_budget = now - self.started_at > self.max_seconds
-            idle_too_long = now - self.last_activity_at > self.idle_seconds
+            # A Claude build can run for many minutes; waiting on a tool isn't idling.
+            idle_too_long = not self._tool_tasks and now - self.last_activity_at > self.idle_seconds
             if over_budget or idle_too_long:
                 self.closed.set()
                 await self.close()

@@ -17,6 +17,11 @@ class WebSettings:
     # Conversation tokens the voice model re-reads each turn; the brain keeps full history, so keep this small.
     context_tokens: int = int(os.getenv("FERN_VOICE_CONTEXT_TOKENS", "4000"))
     notice_poll_seconds: float = 30
+    # Claude Code builder (fern_builder bridge). Empty URL or token = Claude mode unavailable.
+    bridge_url: str = os.getenv("FERN_BRIDGE_URL", "")
+    bridge_token: str = os.getenv("FERN_BRIDGE_TOKEN", "")
+    # Devices allowed to switch to Claude (comma list of device names); empty = every authenticated device.
+    claude_devices: tuple[str, ...] = tuple(name for name in os.getenv("FERN_CLAUDE_DEVICES", "").split(",") if name)
 
 
 web_settings = WebSettings()
