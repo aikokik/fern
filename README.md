@@ -49,6 +49,6 @@ Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` 
 ## Test & eval
 ```bash
 uv run pytest                                                   # offline, scripted model
-uv run inspect eval evals/household.py --model openai/gpt-5-mini && uv run inspect view
+uv run inspect eval evals/household.py --model openai/gpt-6-luna && uv run inspect view
 ```
 Add cases to `evals/household.jsonl`: `tools` expected, `forbid`den, `pending` (approval expected).

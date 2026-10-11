@@ -6,8 +6,10 @@ time from stored token counts, so updating a price here re-prices all history.
 
 from collections import defaultdict
 
-PRICES_AS_OF = "2026-10-09"
+PRICES_AS_OF = "2026-10-11"
 TOKEN_PRICES: dict[str, dict[str, float]] = {
+    # GPT-5.6+ also bill cache writes at 1.25x input; usage doesn't report them, so new input is slightly under-priced.
+    "gpt-6-luna": {"input": 0.10, "cached": 0.01, "output": 0.50},
     "gpt-5.5": {"input": 5.00, "cached": 0.50, "output": 30.00},
     "gpt-5.4-mini": {"input": 0.75, "cached": 0.075, "output": 4.50},
     "gpt-5-mini": {"input": 0.25, "cached": 0.025, "output": 2.00},
