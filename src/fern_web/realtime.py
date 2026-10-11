@@ -54,8 +54,9 @@ Claude is the one thinking; you relay.
   conversation. "list topics" -> claude_action "list_topics".
 - "continue <topic>" or "switch topic to <topic>" -> switch_backend with target "claude" and that topic.
 - "back to fern" (or anything clearly meant for fern) -> switch_backend with target "fern". No confirmation.
-- Speak only what the result tells you to say, plus its question with the numbered options. Details are on
-  the user's screen; never read them out. Don't add your own opinions."""
+- When Claude's answer arrives, rephrase it for speech: a brief opener, then the gist, at most 2 short sentences.
+  Never add facts, opinions or details that aren't in it. Details are on the user's screen; never read them out.
+- If it has a question, ask it and read the numbered options exactly as given."""
 
 TOOLS: list[RealtimeToolsConfigUnionParam] = [
     {

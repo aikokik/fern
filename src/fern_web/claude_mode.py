@@ -68,7 +68,7 @@ class ClaudeMode:
         """A tapped option or typed answer: same as speaking it, but the reply is injected (no tool call to answer)."""
         reply = await self._request(lambda: self.client.turn(self.topic, self._resolve_option(text)))
         if reply is not None:
-            await self.session.say(f"Relay Claude's reply. {self._spoken(reply)}")
+            await self.session.say(f"Rephrase Claude's reply as instructed:\n{self._spoken(reply)}")
 
     async def _switch(self, call_id: str, target: str, topic: str) -> None:
         if target == "fern":
@@ -159,20 +159,22 @@ class ClaudeMode:
             )
 
     def _spoken(self, reply: dict) -> str:
+        """For the voice to rephrase (see CLAUDE_MODE): a short gist and the question; the panel has everything."""
         if reply.get("status") == "shipped":
-            return "Say: shipped, the pull request link is on screen."
+            return "Claude shipped it. The pull request link is on screen."
         say = reply.get("say") or ""
-        spoken = summary(say) or "Done."
-        if spoken != say or reply.get("show"):
-            spoken += " Details are on screen."
+        gist = summary(say) or "Done."
+        lines = [f"Claude's answer: {gist}"]
+        if gist != say or reply.get("show"):
+            lines.append("More detail is on screen.")
         if question := reply.get("question"):
             labels = question["options"]
             if all(len(label) <= SPOKEN_OPTION_CHARS for label in labels):
                 options = " ".join(f"Option {number}: {label}." for number, label in enumerate(labels, 1))
             else:
                 options = f"{len(labels)} options are on screen; answer with a number."
-            spoken += f" Then ask: {summary(question['text'])} {options}"
-        return f"Say only this: {spoken}"
+            lines.append(f"Question: {summary(question['text'])} {options}")
+        return "\n".join(lines)
 
 
 def summary(text: str) -> str:

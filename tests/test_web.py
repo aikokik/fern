@@ -12,6 +12,7 @@ from fern_web import app as web
 from fern_web.brain_client import BrainClient
 from fern_web.claude_client import ClaudeClient
 from fern_web.claude_mode import ClaudeMode, summary
+from fern_web.realtime import instructions_for
 from fern_web.sideband import VoiceSession
 
 DEVICE_TOKEN = "t" * 32
@@ -450,8 +451,8 @@ async def test_claude_reply_goes_to_screen_and_spoken_options_resolve():
 
     output = await call_tool(connection, "ask_claude", {"request": "add a weather tool"}, "c2")
     assert output == (
-        "Say only this: Two ways to do it. Details are on screen. "
-        "Then ask: Which source? Option 1: Open-Meteo. Option 2: Weather.gov."
+        "Claude's answer: Two ways to do it.\nMore detail is on screen.\n"
+        "Question: Which source? Option 1: Open-Meteo. Option 2: Weather.gov."
     )
     assert ("POST", "/topics/weather tool/turn", {"text": "add a weather tool"}) in bridge_requests
     events = browser_events(session)
@@ -541,6 +542,7 @@ def test_voice_speaks_a_summary_and_the_screen_gets_everything():
     spoken = ClaudeMode.__new__(ClaudeMode)._spoken(reply)
 
     assert len(spoken) < 400
-    assert spoken.endswith("Then ask: Which one? 2 options are on screen; answer with a number.")
-    assert "Details are on screen." in spoken
+    assert spoken.endswith("Question: Which one? 2 options are on screen; answer with a number.")
+    assert "More detail is on screen." in spoken
+    assert "rephrase it for speech" in instructions_for("claude", "weather tool")  # paraphrased, not read verbatim
     assert summary(long_say).endswith(".")
