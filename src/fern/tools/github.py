@@ -1,4 +1,4 @@
-"""GitHub for fern's own repo (FERN_GITHUB_REPO): read PRs, issues and CI; create issues; open, close or reopen PRs.
+"""GitHub for fern's own repo (FERN_GITHUB_REPO): read PRs and issues; create issues; open, close or reopen PRs.
 
 Writes are RISKY (your yes first). Merging isn't possible from here. Titles, bodies and comments are written by
 whoever can post to the repo, so everything read comes back marked untrusted.
@@ -69,7 +69,7 @@ async def github_list(
 
 @tool(Tier.READ)
 async def github_read(run: RunContextWrapper[FernContext], number: int) -> str:
-    """Read a pull request or issue: description, latest comments and, for PRs, branches and CI status.
+    """Read a pull request or issue: description, latest comments and, for PRs, its branches.
 
     Args:
         number: The PR or issue number.
@@ -81,10 +81,8 @@ async def github_read(run: RunContextWrapper[FernContext], number: int) -> str:
         lines = [f"#{number} [{item['state']}] {item['title']} ({item['user']['login']})"]
         if "pull_request" in item:
             pull = await _call(context, "GET", f"/pulls/{number}")
-            check_runs = (await _call(context, "GET", f"/commits/{pull['head']['sha']}/check-runs"))["check_runs"]
-            checks = ", ".join(f"{check['name']}: {check['conclusion'] or check['status']}" for check in check_runs)
             merged = " (merged)" if pull.get("merged_at") else ""
-            lines += [f"PR {pull['head']['ref']} -> {pull['base']['ref']}{merged}", f"CI: {checks or 'none'}"]
+            lines.append(f"PR {pull['head']['ref']} -> {pull['base']['ref']}{merged}")  # no CI: needs Checks access
     except GitHubError as error:
         return f"error: {error}"
     lines += ["", (item.get("body") or "(no description)")[:BODY_CHARS]]

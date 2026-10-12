@@ -434,10 +434,6 @@ def fake_github(sent_requests: list, status: int = 200):
                 return httpx.Response(
                     200, json={"head": {"ref": "claude/tv", "sha": "abc"}, "base": {"ref": "main"}, "merged_at": None}
                 )
-            case "GET", "/commits/abc/check-runs":
-                return httpx.Response(
-                    200, json={"check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]}
-                )
             case "PATCH", "/issues/7":
                 return httpx.Response(200, json={"number": 7, "state": "closed"})
         return httpx.Response(404)
@@ -459,7 +455,6 @@ async def test_github_reads_are_untrusted_and_writes_wait_for_approval(make_brai
     tool_output = json.dumps(model.calls[1].input)
     assert "<untrusted source='github'>" in tool_output  # repo text can't pose as instructions
     assert "claude/tv -> main" in tool_output
-    assert "test: success" in tool_output
     assert "aikokik: Looks good" in tool_output
 
     sent_requests.clear()
