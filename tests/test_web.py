@@ -11,7 +11,7 @@ import pytest
 from fern_web import app as web
 from fern_web.brain_client import BrainClient
 from fern_web.claude_client import ClaudeClient
-from fern_web.claude_mode import ClaudeMode, summary
+from fern_web.claude_mode import chosen_label, spoken, spoken_options
 from fern_web.realtime import instructions_for
 from fern_web.sideband import VoiceSession
 
@@ -125,42 +125,47 @@ def response_done(status: str, arguments: str, call_id: str = "c1", tool: str = 
 
 
 BRIDGE_TOKEN = "b" * 32
-PLAN_REPLY = {
-    "topic": "weather-tool",
-    "status": "planning",
-    "say": "Two ways to do it.",
-    "show": "## Plan\n- fetch the forecast",
-    "question": {"text": "Which source?", "options": ["Open-Meteo", "Weather.gov"]},
-    "is_error": False,
-}
 PR_URL = "https://github.com/aikokik/fern/pull/9"
+DONE = {"type": "done", "reply": f"Tests pass and the PR is open.\n\nPR: {PR_URL}", "is_error": False, "cost_usd": 0.1}
+STEPS = [{"type": "progress", "text": "Bash: uv run pytest"}, {"type": "text", "markdown": "All tests pass."}]
+PERMISSION_ID = "a1" * 16
+PERMISSION = {"type": "permission", "id": PERMISSION_ID, "tool": "Bash", "detail": "Bash: git push"}
+QUESTION = {
+    "type": "question",
+    "id": "q1",
+    "questions": [{"question": "Which source?", "options": ["Open-Meteo", "Weather.gov"], "multi_select": False}],
+}
 
 
-def fake_bridge(bridge_requests: list) -> httpx.MockTransport:
-    """The builder bridge (fern_builder.bridge) as fern_web sees it."""
+class FakeBridge:
+    """The Claude bridge on the Mac (fern_builder.bridge) as fern_web sees it: streams a scripted turn as NDJSON,
+    pausing at each permission request or question until fern answers it."""
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        bridge_requests.append((request.method, request.url.path, json.loads(request.content or b"null")))
+    def __init__(self, turn: list[dict] | None = None, status: int = 200):
+        self.turn = turn or [DONE]
+        self.status = status
+        self.requests: list[tuple[str, str, object]] = []
+        self.answered = asyncio.Event()
+        self.transport = httpx.MockTransport(self.handle)
+
+    async def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((request.method, request.url.path, json.loads(request.content or b"null")))
         if request.headers["authorization"] != f"Bearer {BRIDGE_TOKEN}":
             return httpx.Response(401)
-        match request.url.path.rsplit("/", 1)[-1]:
-            case _ if "broken" in request.url.path:
-                return httpx.Response(500, json={"detail": "claude exited 1"})
-            case "turn":
-                return httpx.Response(200, json=PLAN_REPLY)
-            case "ship":
-                shipped = {
-                    "status": "shipped",
-                    "say": "Pushed and opened the pull request.",
-                    "show": "",
-                    "question": None,
-                }
-                return httpx.Response(200, json=shipped | {"pr_url": PR_URL})
-            case "topics":
-                return httpx.Response(200, json=[{"slug": "weather-tool", "status": "planning", "pr_url": ""}])
-        return httpx.Response(404)
+        if self.status != 200:
+            return httpx.Response(self.status)
+        if request.url.path == "/messages":
+            return httpx.Response(200, content=self.stream(), headers={"content-type": "application/x-ndjson"})
+        self.answered.set()
+        return httpx.Response(200, json={"ok": True})
 
-    return httpx.MockTransport(handle)
+    async def stream(self):
+        self.answered.clear()  # only answers given during this turn count
+        for event in self.turn:
+            yield (json.dumps(event) + "\n").encode()
+            if event["type"] in ("permission", "question"):
+                await self.answered.wait()
+                self.answered.clear()
 
 
 async def wait_until(condition, timeout_seconds=2.0):
@@ -343,7 +348,7 @@ def web_client(monkeypatch):
     )
     monkeypatch.setattr(web.state, "openai", fake_openai, raising=False)
     monkeypatch.setattr(web.state, "brain", BrainClient("http://brain", fake_brain(recorded_calls)), raising=False)
-    claude = ClaudeClient("http://builder", BRIDGE_TOKEN, fake_bridge([]))
+    claude = ClaudeClient("http://bridge", BRIDGE_TOKEN, FakeBridge().transport)
     monkeypatch.setattr(web.state, "claude", claude, raising=False)
     started_calls = []
 
@@ -397,24 +402,44 @@ async def test_events_scoped_to_owner(web_client):
     assert response.status_code == 404
 
 
-async def start_claude_session(claude_devices=(), configured=True):
-    connection, bridge_requests = FakeRealtimeConnection(), []
-    bridge_url = "http://builder" if configured else ""
-    claude = ClaudeClient(bridge_url, BRIDGE_TOKEN, fake_bridge(bridge_requests))
+async def start_claude_session(bridge: FakeBridge, claude_devices=(), configured=True):
+    connection = FakeRealtimeConnection()
+    claude = ClaudeClient("http://bridge" if configured else "", BRIDGE_TOKEN, bridge.transport)
     session = voice_session(connection, [], claude=claude, claude_devices=claude_devices)
     run_task = asyncio.create_task(session.run())
-    return connection, session, run_task, bridge_requests
+    return connection, session, run_task
 
 
-async def call_tool(connection: FakeRealtimeConnection, tool: str, arguments: dict, call_id: str) -> str:
-    """Send one completed tool call; return what fern answered to it."""
+async def start_tool(connection: FakeRealtimeConnection, tool: str, arguments: dict, call_id: str) -> None:
     await connection.incoming.put(response_done("completed", json.dumps(arguments), call_id=call_id, tool=tool))
 
+
+async def output_for(connection: FakeRealtimeConnection, call_id: str) -> str:
     def answered():
         return any(event.get("item", {}).get("call_id") == call_id for event in connection.sent)
 
     await wait_until(answered)
     return next(event["item"]["output"] for event in connection.sent if event.get("item", {}).get("call_id") == call_id)
+
+
+async def call_tool(connection: FakeRealtimeConnection, tool: str, arguments: dict, call_id: str) -> str:
+    """Send one completed tool call; return what fern answered to it."""
+    await start_tool(connection, tool, arguments, call_id)
+    return await output_for(connection, call_id)
+
+
+async def user_says(connection: FakeRealtimeConnection, words: str) -> None:
+    await connection.incoming.put(
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript=words)
+    )
+
+
+def notices(connection: FakeRealtimeConnection) -> list[str]:
+    return [
+        event["item"]["content"][0]["text"]
+        for event in connection.sent
+        if event.get("item", {}).get("role") == "system"
+    ]
 
 
 def browser_events(session: VoiceSession) -> list[dict]:
@@ -424,92 +449,123 @@ def browser_events(session: VoiceSession) -> list[dict]:
     return events
 
 
-async def test_switch_to_claude_and_back_swaps_the_voice_instructions():
-    connection, session, run_task, _bridge_requests = await start_claude_session()
+async def test_open_claude_and_back_swaps_the_voice_instructions():
+    connection, session, run_task = await start_claude_session(FakeBridge())
 
     output = await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
-    assert "topic name" in output  # no topic yet: ask for one instead of switching
-    assert not session.claude.active
-
-    output = await call_tool(connection, "switch_backend", {"target": "claude", "topic": "weather tool"}, "c2")
     assert "Switched to Claude Code" in output
     instructions_update = next(event for event in connection.sent if event["type"] == "session.update")
-    assert 'topic "weather tool"' in instructions_update["session"]["instructions"]
-    assert {"type": "mode", "mode": "claude", "topic": "weather tool"} in browser_events(session)
+    assert "same Claude as\nin their VS Code chat" in instructions_update["session"]["instructions"]
+    assert {"type": "mode", "mode": "claude"} in browser_events(session)
 
-    output = await call_tool(connection, "ask_fern", {"request": "set an alarm"}, "c3")
+    output = await call_tool(connection, "ask_fern", {"request": "set an alarm"}, "c2")
     assert "talking to Claude Code" in output  # fern's tools are off while Claude is listening
 
-    output = await call_tool(connection, "switch_backend", {"target": "fern"}, "c4")
+    output = await call_tool(connection, "switch_backend", {"target": "fern"}, "c3")
     assert "back to fern" in output
     assert (
         "You are fern" in [e for e in connection.sent if e["type"] == "session.update"][-1]["session"]["instructions"]
     )
-    assert {"type": "mode", "mode": "fern", "topic": ""} in browser_events(session)
-    assert not session.claude.active
+    assert {"type": "mode", "mode": "fern"} in browser_events(session)
     await session.close()
     await run_task
 
 
-async def test_claude_reply_goes_to_screen_and_spoken_options_resolve():
-    connection, session, run_task, bridge_requests = await start_claude_session()
-    await call_tool(connection, "switch_backend", {"target": "claude", "topic": "weather tool"}, "c1")
+async def test_a_claude_turn_streams_to_the_screen_and_the_voice_gets_the_gist():
+    bridge = FakeBridge([*STEPS, DONE])
+    connection, session, run_task = await start_claude_session(bridge)
+    await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
+    browser_events(session)
 
-    output = await call_tool(connection, "ask_claude", {"request": "add a weather tool"}, "c2")
-    assert output == (
-        "Claude's answer: Two ways to do it.\nMore detail is on screen.\n"
-        "Question: Which source? Option 1: Open-Meteo. Option 2: Weather.gov."
-    )
-    assert ("POST", "/topics/weather tool/turn", {"text": "add a weather tool"}) in bridge_requests
-    events = browser_events(session)
-    assert [event for event in events if event["type"] == "working"] == [
+    output = await call_tool(connection, "ask_claude", {"request": "run the tests and push"}, "c2")
+    assert output == "Claude's answer: Tests pass and the PR is open.\nMore detail is on screen."
+    assert ("POST", "/messages", {"text": "run the tests and push"}) in bridge.requests
+    assert browser_events(session) == [
         {"type": "working", "by": "claude"},
+        {"type": "claude_turn", "text": "run the tests and push"},
+        {"type": "claude_progress", "text": "Bash: uv run pytest"},  # live steps, like the VS Code chat
+        {"type": "claude_text", "markdown": "All tests pass."},
         {"type": "working", "by": ""},
+        {"type": "claude_link", "label": "Pull request", "url": PR_URL},
     ]
-    panel_update = next(event for event in events if event["type"] == "claude_reply")
-    assert panel_update["say"] == "Two ways to do it."
-    assert panel_update["markdown"].startswith("## Plan")
-    assert panel_update["question"]["options"] == ["Open-Meteo", "Weather.gov"]
-
-    await call_tool(connection, "ask_claude", {"request": "option 2"}, "c3")
-    assert bridge_requests[-1][2] == {"text": 'My answer to "Which source?": Weather.gov'}
     await session.close()
     await run_task
 
 
-async def test_ship_puts_the_pull_request_link_on_screen():
-    connection, session, run_task, bridge_requests = await start_claude_session()
-    await call_tool(connection, "switch_backend", {"target": "claude", "topic": "weather tool"}, "c1")
+async def test_claude_permission_needs_the_users_spoken_yes():
+    bridge = FakeBridge([PERMISSION, DONE])
+    connection, session, run_task = await start_claude_session(bridge)
+    await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
+    await start_tool(connection, "ask_claude", {"request": "push it"}, "c2")
+    await wait_until(lambda: session.claude.permission is not None)
+    assert "Notice: Claude wants permission for Bash: git push. Ask the user: approve?" in notices(connection)
+    assert {"type": "claude_permission", "id": PERMISSION_ID, "detail": "Bash: git push"} in browser_events(session)
 
-    output = await call_tool(connection, "claude_action", {"action": "ship", "title": "Add weather tool"}, "c2")
-    assert output == ("Claude's answer: Pushed and opened the pull request.\nThe pull request link is on screen.")
-    assert ("POST", "/topics/weather tool/ship", {"title": "Add weather tool"}) in bridge_requests
-    assert {"type": "claude_link", "label": "Pull request", "url": PR_URL} in browser_events(session)
+    await user_says(connection, "no wait")
+    output = await call_tool(connection, "decide_approval", {"approve": True}, "c3")  # the model misheard
+    assert output.startswith("Not approved")
+    assert not any(path.startswith("/permissions") for _method, path, _body in bridge.requests)
+
+    await user_says(connection, "yes, don't ask again")
+    output = await call_tool(connection, "decide_approval", {"approve": True, "always": True}, "c4")
+    assert output == "Approved. Claude continues."
+    assert ("POST", f"/permissions/{PERMISSION_ID}", {"decision": "always"}) in bridge.requests
+    assert (await output_for(connection, "c2")).startswith("Claude's answer:")  # the turn finished
     await session.close()
     await run_task
+
+
+async def test_claude_questions_are_answered_by_voice():
+    bridge = FakeBridge([QUESTION, DONE])
+    connection, session, run_task = await start_claude_session(bridge)
+    await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
+    await start_tool(connection, "ask_claude", {"request": "add weather"}, "c2")
+    await wait_until(lambda: session.claude.question is not None)
+    assert "Notice: Claude asks: Which source? Option 1: Open-Meteo. Option 2: Weather.gov." in notices(connection)
+
+    output = await call_tool(connection, "ask_claude", {"request": "option 2"}, "c3")
+    assert output == "Answer sent to Claude."
+    assert ("POST", "/questions/q1", {"answers": {"Which source?": "Weather.gov"}}) in bridge.requests
+    assert (await output_for(connection, "c2")).startswith("Claude's answer:")
+    await session.close()
+    await run_task
+
+
+async def test_stop_new_chat_and_hanging_up_mid_prompt():
+    bridge = FakeBridge([PERMISSION, DONE])
+    connection, session, run_task = await start_claude_session(bridge)
+    await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
+    assert await call_tool(connection, "claude_action", {"action": "stop"}, "c2") == "Stopping Claude."
+    await call_tool(connection, "claude_action", {"action": "new_chat"}, "c3")
+    assert [path for _method, path, _body in bridge.requests] == ["/interrupt", "/new"]
+
+    await start_tool(connection, "ask_claude", {"request": "push it"}, "c4")
+    await wait_until(lambda: session.claude.permission is not None)
+    await session.close()  # nobody can answer anymore: stop that turn
+    await run_task
+    assert bridge.requests[-1][1] == "/interrupt"
 
 
 async def test_claude_unavailable_device_not_allowed_or_bridge_failing():
-    connection, session, run_task, _bridge_requests = await start_claude_session(configured=False)
-    output = await call_tool(connection, "switch_backend", {"target": "claude", "topic": "weather"}, "c1")
-    assert "isn't set up" in output
+    connection, session, run_task = await start_claude_session(FakeBridge(), configured=False)
+    assert "isn't set up" in await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
     assert not session.claude.active
     await session.close()
     await run_task
 
-    connection, session, run_task, bridge_requests = await start_claude_session(claude_devices=("tablet",))
-    output = await call_tool(connection, "switch_backend", {"target": "claude", "topic": "weather"}, "c1")
-    assert "isn't allowed" in output
-    assert not bridge_requests
+    bridge = FakeBridge()
+    connection, session, run_task = await start_claude_session(bridge, claude_devices=("tablet",))
+    assert "isn't allowed" in await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
+    assert not bridge.requests
     await session.close()
     await run_task
 
-    connection, session, run_task, _bridge_requests = await start_claude_session()
-    await call_tool(connection, "switch_backend", {"target": "claude", "topic": "broken"}, "c1")
+    connection, session, run_task = await start_claude_session(FakeBridge(status=500))
+    await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
     output = await call_tool(connection, "ask_claude", {"request": "hi"}, "c2")
-    assert "failed" in output
+    assert output.startswith("Claude Code failed")
     error = next(event for event in browser_events(session) if event["type"] == "error")
-    assert error["reference"]
+    assert error["reference"] in output
     await session.close()
     await run_task
 
@@ -525,30 +581,35 @@ async def test_waiting_on_a_tool_is_not_idle():
     assert session.closed.is_set()
 
 
-async def test_tapped_option_goes_to_claude(web_client):
+async def test_tapped_answers_reach_claude(web_client, monkeypatch):
     client, *_ = web_client
+    bridge = FakeBridge()
+    monkeypatch.setattr(web.state, "claude", ClaudeClient("http://bridge", BRIDGE_TOKEN, bridge.transport))
     session_id = (await client.post("/realtime/call", json=OFFER, headers=AUTHORIZED)).json()["session_id"]
     _token_hash, session = web.state.voice_sessions[session_id]
-    answer = {"session_id": session_id, "text": "option 1"}
+    tap_allow = {"session_id": session_id, "permission_id": PERMISSION_ID, "decision": "allow"}
+    tap_option = {"session_id": session_id, "text": "option 1"}
 
-    assert (await client.post("/realtime/claude", json=answer, headers=AUTHORIZED)).status_code == 409
-    session.claude.active, session.claude.topic = True, "weather tool"
+    assert (await client.post("/realtime/claude/permission", json=tap_allow, headers=AUTHORIZED)).status_code == 409
+    assert (await client.post("/realtime/claude", json=tap_option, headers=AUTHORIZED)).status_code == 409
+    session.claude.permission = PERMISSION
+    session.claude.question = {"id": "q1", "questions": QUESTION["questions"], "answers": {}}
     other_device = {"Authorization": "Bearer other-device-token"}
-    assert (await client.post("/realtime/claude", json=answer, headers=other_device)).status_code == 404
+    assert (await client.post("/realtime/claude/permission", json=tap_allow, headers=other_device)).status_code == 404
 
-    response = await client.post("/realtime/claude", json=answer, headers=AUTHORIZED)
-    assert response.status_code == 202
-    await wait_until(lambda: session.claude.last_question is not None)  # Claude's reply reached the session
+    assert (await client.post("/realtime/claude/permission", json=tap_allow, headers=AUTHORIZED)).status_code == 202
+    assert (await client.post("/realtime/claude", json=tap_option, headers=AUTHORIZED)).status_code == 202
+    await wait_until(lambda: len(bridge.requests) == 2)
+    assert ("POST", f"/permissions/{PERMISSION_ID}", {"decision": "allow"}) in bridge.requests
+    assert ("POST", "/questions/q1", {"answers": {"Which source?": "Open-Meteo"}}) in bridge.requests
 
 
-def test_voice_speaks_a_summary_and_the_screen_gets_everything():
-    long_say = "First point is short. " + "Then a very long explanation. " * 20
+def test_the_voice_gets_a_short_gist_and_speakable_options():
+    long_reply = "First point is short. " + "Then a very long explanation. " * 20
+    assert len(spoken(long_reply)) < 300
+    assert spoken(long_reply).endswith("More detail is on screen.")
     long_options = ["Use a small local model that runs on the Mac", "Call the hosted forecast API every hour"]
-    reply = {"say": long_say, "question": {"text": "Which one?", "options": long_options}}
-    spoken = ClaudeMode.__new__(ClaudeMode)._spoken(reply)
-
-    assert len(spoken) < 400
-    assert spoken.endswith("Question: Which one? 2 options are on screen; answer with a number.")
-    assert "More detail is on screen." in spoken
-    assert "rephrase it for speech" in instructions_for("claude", "weather tool")  # paraphrased, not read verbatim
-    assert summary(long_say).endswith(".")
+    assert spoken_options(long_options) == "2 options are on screen; answer with a number."
+    assert spoken_options(["Yes", "No"]) == "Option 1: Yes. Option 2: No."
+    assert chosen_label("the second one", ["Open-Meteo", "Weather.gov"]) == "Weather.gov"
+    assert "rephrase it for speech" in instructions_for("claude")  # paraphrased, not read verbatim

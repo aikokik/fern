@@ -1,35 +1,30 @@
-"""Settings for the builder: the Claude Code bridge. Claude uses its own GitHub access (`gh` + `git` with GH_TOKEN,
-a token scoped to this repo). This package never imports `fern` or `fern_web`.
+"""Settings for the Claude Code bridge. It runs on the Mac, like the VS Code plugin, so Claude gets the user's own
+login, `gh`, permission rules and memories. This package never imports `fern` or `fern_web`.
 """
 
 import os
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def read_env_value(env_file: Path, name: str) -> str:
+    """One value from .env, without loading the rest: Claude inherits this process's environment."""
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            return value.strip().strip("\"'")
+    return ""
 
 
 @dataclass(frozen=True)
 class BuilderSettings:
-    workspace: Path = Path(os.getenv("FERN_WORKSPACE", "/workspace"))  # one git clone per topic
-    github_repo: str = os.getenv("FERN_GITHUB_REPO", "aikokik/fern")
-    git_remote: str = os.getenv("FERN_GIT_REMOTE", "")  # override for tests; default is the GitHub HTTPS URL
-    claude_bin: str = os.getenv("FERN_CLAUDE_BIN", "claude")
-    claude_model: str = os.getenv("FERN_CLAUDE_MODEL", "sonnet")
-    bridge_token: str = os.getenv("FERN_BRIDGE_TOKEN", "")  # fern_web -> bridge
-    plan_turn_seconds: float = float(os.getenv("FERN_PLAN_TURN_SECONDS", "600"))
-    build_turn_seconds: float = float(os.getenv("FERN_BUILD_TURN_SECONDS", "1800"))
-
-    @property
-    def remote_url(self) -> str:
-        return self.git_remote or f"https://github.com/{self.github_repo}.git"
-
-
-def topic_slug(name: str) -> str:
-    """'TV control!' -> 'tv-control'. Topic names become directory and branch names, so keep them tame."""
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-")
-    if not slug:
-        raise ValueError("topic name needs letters or digits")
-    return slug
+    project_dir: Path = Path(os.getenv("FERN_PROJECT_DIR", str(PROJECT_ROOT)))  # Claude works here, like VS Code
+    approval_timeout_seconds: float = float(os.getenv("FERN_APPROVAL_TIMEOUT_SECONDS", "600"))  # unanswered = no
+    bridge_token: str = field(default_factory=lambda: read_env_value(PROJECT_ROOT / ".env", "FERN_BRIDGE_TOKEN"))
 
 
 builder_settings = BuilderSettings()

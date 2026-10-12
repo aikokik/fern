@@ -21,7 +21,12 @@ from fern_web.claude_mode import CLAUDE_TOOLS, ClaudeMode
 log = logging.getLogger("fern_web")
 GOODBYE_SECONDS = 3  # let the spoken goodbye finish before hanging up
 TRANSCRIPT_WAIT_SECONDS = 3  # transcription of the user's "yes" can land just after the model's tool call
-SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|approved?|confirm(ed)?|go ahead|do it|send it|sure|okay|ok)\b", re.I)
+DONT_ASK_AGAIN = re.compile(r"\bdon'?t ask (me )?again\b", re.I)  # a yes ("always"), not a no
+SPOKEN_YES = re.compile(
+    r"\b(yes|yeah|yep|yup|approved?|allow|always|confirm(ed)?|go ahead|do it|send it|sure|okay|ok)\b"
+    r"|\bdon'?t ask (me )?again\b",
+    re.I,
+)
 SPOKEN_NO = re.compile(r"\b(no|nope|don'?t|do not|cancel|reject(ed)?|stop|wait)\b", re.I)
 
 
@@ -176,6 +181,11 @@ class VoiceSession:
         self.last_activity_at = time.monotonic()
         self.run_in_background(self.claude.answer_from_screen(text))
 
+    def decide_claude_from_screen(self, decision: str) -> None:
+        """A tapped Approve / Always / Reject on Claude's permission card."""
+        self.last_activity_at = time.monotonic()
+        self.run_in_background(self.claude.decide_from_screen(decision))
+
     async def _run_tool(self, name: str, call_id: str, arguments: str) -> None:
         try:
             parsed_arguments = json.loads(arguments or "{}")
@@ -190,7 +200,9 @@ class VoiceSession:
         elif name == "ask_fern":
             await self._ask_fern(call_id, parsed_arguments.get("request", ""))
         elif name == "decide_approval":
-            await self._decide_approval(call_id, bool(parsed_arguments.get("approve")))
+            await self._decide_approval(
+                call_id, bool(parsed_arguments.get("approve")), bool(parsed_arguments.get("always"))
+            )
         elif name == "end_conversation":
             # No new response: the model already said its goodbye in the turn that called this tool.
             await self.send_tool_output(call_id, "ok", respond=False)
@@ -218,7 +230,13 @@ class VoiceSession:
         await self.publish(brain_response)
         await self.send_tool_output(call_id, self._describe(brain_response))
 
-    async def _decide_approval(self, call_id: str, approve: bool) -> None:
+    async def _decide_approval(self, call_id: str, approve: bool, always: bool = False) -> None:
+        if self.claude.permission is not None:  # Claude's request comes first: it's what was just asked
+            if approve and not await self._user_said_yes():
+                await self.send_tool_output(call_id, "Not approved: the user must say yes out loud. Ask them again.")
+                return
+            await self.send_tool_output(call_id, await self.claude.decide(approve, always))
+            return
         if not self.awaiting_approval:
             await self.send_tool_output(call_id, "Nothing is waiting for approval.")
             return
@@ -249,7 +267,8 @@ class VoiceSession:
                 await asyncio.wait_for(self._user_spoke.wait(), TRANSCRIPT_WAIT_SECONDS)
         if self.user_spoke_at <= self.awaiting_since:
             return False
-        return bool(SPOKEN_YES.search(self.last_user_words)) and not SPOKEN_NO.search(self.last_user_words)
+        words = self.last_user_words
+        return bool(SPOKEN_YES.search(words)) and not SPOKEN_NO.search(DONT_ASK_AGAIN.sub("", words))
 
     def _describe(self, brain_response: dict) -> str:
         """Tool output for the voice model: short, and for paused actions, what needs a yes/no."""
@@ -358,6 +377,7 @@ class VoiceSession:
 
     async def _finish(self) -> None:
         self.closed.set()
+        await self.claude.end()
         await self.browser_events.put({"type": "end"})
         try:
             duration = time.monotonic() - self.started_at

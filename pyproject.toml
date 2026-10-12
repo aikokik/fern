@@ -20,6 +20,11 @@ fern = "fern.cli:main"
 fern-web = "fern_web.app:main"
 fern-bridge = "fern_builder.bridge:main"
 
+[project.optional-dependencies]
+bridge = [
+    "claude-agent-sdk>=0.2.165",
+]
+
 [tool.uv.build-backend]
 module-name = ["fern", "fern_web", "fern_builder"]
 
@@ -29,6 +34,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "claude-agent-sdk>=0.2.165",
     "inspect-ai>=0.3.276",
     "pyright>=1.1.414",
     "pytest>=9.1.1",

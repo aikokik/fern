@@ -13,6 +13,6 @@ security-review:
           - src/fern_web/sideband.py
           - src/fern_web/claude_mode.py
           - src/fern_web/static/app.js
-          - src/fern_builder/claude_cli.py
           - src/fern_builder/bridge.py
+          - src/fern_builder/config.py
           - src/fern/tools/github.py

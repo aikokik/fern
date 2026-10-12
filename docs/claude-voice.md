@@ -1,65 +1,77 @@
 # Talking to Claude Code through fern
 
-fern's voice can hand the conversation to Claude Code: plan a feature by voice (long text on screen), have it
-built, try it, and ship a PR. Claude runs on **your Pro/Max plan** (Claude Code CLI), inside fern's sandbox.
+Say "open Claude" to fern and you're talking to Claude Code, the same as the VS Code chat:
+- your project folder and real working copy
+- your Claude login and plan, your `gh`
+- your permission rules and saved memories
+- it continues your latest conversation
 
-Status: **phase 2 of 4** (builder, voice switching + screen panel). Preview (phase 3) and usage (phase 4) come
-next.
+Claude has no voice of its own, so fern's voice speaks for it: a short gist out loud, everything else on screen.
+
+## How it works
+```
+phone/laptop ─▶ fern web (Docker) ─▶ egress proxy ─▶ fern-bridge on your Mac ─▶ Claude Code (Agent SDK)
+                  voice + panel                       127.0.0.1:8770, token      your folder, login, gh, settings
+```
+- **`fern-bridge`** (`src/fern_builder/bridge.py`) runs on the Mac, not in Docker. It drives Claude Code with the
+  **Claude Agent SDK**, the same engine IDE integrations use.
+- **Your setup applies:** `setting_sources = user, project, local`, so your allow/deny rules (e.g. no `.env`),
+  CLAUDE.md and memories apply as in VS Code.
+- **Your latest conversation continues as a fork,** so an open VS Code chat isn't touched. "New chat" starts fresh.
+  After 20 idle minutes the session closes, and the next message continues your latest conversation again.
+- **Live progress:** Claude's steps ("Bash: uv run pytest", "Edit: src/…") and text stream to the panel while it
+  works.
+- **Prompts come to you:** when your settings would make Claude ask permission, fern shows **Approve / Always /
+  Reject** and asks "Approve?" out loud.
+  - Only your own transcribed "yes", said after the question, or a tap approves.
+  - "Always" (or "yes, don't ask again") saves the rule to `.claude/settings.local.json`, like VS Code.
+  - Claude's multiple-choice questions show as buttons; answer "option 2" or tap.
 
 ## Talking to Claude
 | Say | What happens |
 |---|---|
-| "switch to Claude about weather tool" | Same voice, now relaying to Claude Code for topic `weather tool` (asks for a topic if you didn't name one) |
-| anything else | Sent to Claude. It answers in a sentence or two; plans and details appear in the **Claude panel** on screen |
-| "option 2" / "the first one" (or tap it) | Answers Claude's on-screen question |
-| "build it" | Claude implements the agreed plan and runs tests + lint (can take minutes; the session stays open) |
-| "ship it" | Claude commits, pushes `claude/<topic>` and opens the PR itself; the link shows in the panel |
-| "list topics" / "continue weather tool" | See resumable topics / pick one up again |
+| "open Claude" / "switch to Claude" | Same voice, now relaying to Claude Code |
+| anything | Sent to Claude; steps and text stream to the panel, the voice gives the gist |
+| "yes" / "no" / "always" (after "Approve?") | Answers Claude's permission prompt |
+| "option 2" / "the first one" (or tap) | Answers Claude's question |
+| "stop" | Interrupts what Claude is doing |
+| "new chat" | The next message starts a fresh conversation |
 | "back to fern" | fern's own tools again; the panel stays readable |
 
-While talking to Claude, fern's tools (alarms, memory, approvals) are off; say "back to fern" first.
-One Claude request runs at a time per session; asking again during a build gets "still working".
+While talking to Claude, fern's tools (alarms, memory) are off; say "back to fern" first. If you hang up while Claude
+waits on a prompt, that turn is stopped.
 
-## How it's isolated
-The `builder` container has the Claude Code CLI, the bridge API and a git clone of the repo per topic. It doesn't
-have `.env`, `data/`, or internet beyond Anthropic/claude.ai/GitHub/PyPI.
-
-- Claude's processes see only `CLAUDE_CODE_OAUTH_TOKEN` and `GH_TOKEN` (its own GitHub access), not the bridge
-  token.
-- Plan turns can read files and use `gh`.
-- Build turns can also edit files and run `uv sync / pytest / ruff / pyright`, `git` and `gh`.
-- **GitHub is Claude's own access:** `gh` + `git` with `FERN_BUILDER_GITHUB_TOKEN`. It's told to work on
-  `claude/<topic>` and never push to main or merge, but **only the token's scope and GitHub's rules enforce
-  that**. Add a ruleset on `main`: GitHub → Settings → Rules → "Restrict deletions", "Block force pushes",
-  "Require a pull request before merging".
-
-## Setup (once)
-1. **Claude token** (on your Mac, needs the Claude Code CLI): `claude setup-token`, then copy the printed token.
-2. **GitHub token**: github.com → Settings → Developer settings → Fine-grained tokens → only `aikokik/fern` →
-   **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, **Checks: Read**.
-3. Add to `.env` (generate the bridge secret with `openssl rand -hex 24`):
+## Setup (once, on the Mac)
+1. Be logged in to Claude Code, as you are for VS Code. The Agent SDK ships its own CLI and uses the same login.
+2. `uv sync --extra bridge`
+3. In `.env`: `FERN_BRIDGE_TOKEN=…` (`openssl rand -hex 24`). The bridge reads only this key from `.env`, so no
+   other secret reaches Claude. Optional: `FERN_CLAUDE_DEVICES=phone` (devices allowed to open Claude).
+4. Start the bridge and keep it running (LaunchAgent, from the repo root):
    ```
-   CLAUDE_CODE_OAUTH_TOKEN=…
-   FERN_BUILDER_GITHUB_TOKEN=github_pat_…
-   FERN_BRIDGE_TOKEN=…
-   FERN_CLAUDE_MODEL=sonnet
-   FERN_CLAUDE_DEVICES=phone          # optional: device names allowed to switch to Claude (empty = all)
+   sed -e "s|PROJECT_DIR|$PWD|g" -e "s|HOME_DIR|$HOME|g" deploy/com.fern.bridge.plist > ~/Library/LaunchAgents/com.fern.bridge.plist
+   launchctl load ~/Library/LaunchAgents/com.fern.bridge.plist
    ```
-4. `cp .env deploy/.env && cd deploy && FERN_BIND=0.0.0.0 docker compose up -d --build`
+   Or run it in a terminal: `uv run --extra bridge fern-bridge`. Logs: `~/Library/Logs/fern-bridge.log`.
+5. `cp .env deploy/.env && cd deploy && docker compose up -d --build --remove-orphans`
 
-## GitHub
-- **Claude** uses `gh` and `git` directly: PRs, issues, CI, comments, commits and pushes. Ask it by voice
-  ("Claude, what's failing on PR 8?").
-- **fern** has `github_list` / `github_read` and, with your spoken yes, `github_create_issue`, `github_open_pr` and
-  `github_set_state`, using `FERN_GITHUB_REPO` + `FERN_GITHUB_TOKEN` (fine-grained, `aikokik/fern` only:
-  **Pull requests**, **Issues** Read and write, **Checks** Read). Never merge.
+## Security
+Voice Claude isn't sandboxed: like the VS Code plugin, it can do whatever you could do on this Mac, within your
+permission rules. What protects you:
+- **Approvals:** your rules, plus a spoken or tapped approval for anything they'd ask about. A permission request
+  can't approve itself: it needs your own "yes", transcribed after the question.
+- **Who can open Claude:** `FERN_CLAUDE_DEVICES`, which limits it to your devices.
+- **The bridge itself:** it listens only on `127.0.0.1` and needs `FERN_BRIDGE_TOKEN`. Docker reaches it through
+  the egress proxy (`host.docker.internal` is on the allowlist). The brain's own in-app allowlist still blocks it.
+- **Context cost:** continuing a long VS Code chat means each voice turn re-reads that context. It's cached, but it
+  uses plan limits faster. Claude Code compacts it automatically.
 
-## Bridge API (used by fern's web app)
-`Authorization: Bearer $FERN_BRIDGE_TOKEN`, reachable only inside the sealed network at `http://builder:8770`.
+## Bridge API (fern_web → fern-bridge)
+`Authorization: Bearer $FERN_BRIDGE_TOKEN`.
 
 | Call | Does |
 |---|---|
-| `POST /topics/{name}/turn {text}` | One plan-mode turn (clones the repo on first use) → `{say, show, question, turn_cost_usd}` |
-| `POST /topics/{name}/build {text?}` | Implement the agreed plan, run tests and lint |
-| `POST /topics/{name}/ship {title}` | A build turn where Claude commits, pushes `claude/<topic>` and opens the PR → `{pr_url}` |
-| `GET /topics` | Resumable topics with status |
+| `POST /messages {text}` | One turn, streamed as NDJSON: `progress`, `text`, `permission`, `question`, `ping`, then `done` / `error` |
+| `POST /permissions/{id} {decision}` | `allow`, `always` or `deny` |
+| `POST /questions/{id} {answers}` | `{question: label}` |
+| `POST /interrupt` | Stop the current turn |
+| `POST /new` | The next message starts a fresh conversation |

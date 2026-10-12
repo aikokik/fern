@@ -29,11 +29,13 @@ services:
       FERN_VOICE_DAILY_MINUTES: ${FERN_VOICE_DAILY_MINUTES:-30}
       FERN_VOICE_MAX_OUTPUT_TOKENS: ${FERN_VOICE_MAX_OUTPUT_TOKENS:-600}
       FERN_VOICE_CONTEXT_TOKENS: ${FERN_VOICE_CONTEXT_TOKENS:-4000}
-      FERN_BRIDGE_URL: http://builder:8770
+      # Claude Code runs on the Mac like the VS Code plugin (fern-bridge, see docs/claude-voice.md); reached via egress.
+      FERN_BRIDGE_URL: http://host.docker.internal:8770
       FERN_BRIDGE_TOKEN: ${FERN_BRIDGE_TOKEN:-}
       FERN_CLAUDE_DEVICES: ${FERN_CLAUDE_DEVICES:-}  # device names allowed to switch to Claude; empty = all
       HTTPS_PROXY: http://egress:8888
-      NO_PROXY: brain,builder
+      HTTP_PROXY: http://egress:8888
+      NO_PROXY: brain
     networks: [sealed]
     read_only: true
     tmpfs: ["/tmp:size=16m"]
@@ -41,29 +43,6 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m
     pids_limit: 64
-    restart: unless-stopped
-
-  # Claude Code CLI on your Pro/Max plan + the bridge fern_web talks to. Can't see .env or data/. Claude's processes
-  # get only its Claude token and its own GitHub token (fern_builder/claude_cli.py CHILD_ENV), not the bridge token.
-  builder:
-    build: { context: .., dockerfile: deploy/Dockerfile.builder }
-    command: ["fern-bridge", "--host", "0.0.0.0", "--port", "8770"]
-    environment:
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      GH_TOKEN: ${FERN_BUILDER_GITHUB_TOKEN:-}  # Claude's gh + git: fine-grained, this repo only
-      FERN_GITHUB_REPO: ${FERN_GITHUB_REPO:-aikokik/fern}
-      FERN_CLAUDE_MODEL: ${FERN_CLAUDE_MODEL:-sonnet}
-      FERN_BRIDGE_TOKEN: ${FERN_BRIDGE_TOKEN:-}
-      HTTPS_PROXY: http://egress:8888
-      HTTP_PROXY: http://egress:8888
-    volumes: ["builder-workspace:/workspace", "builder-state:/state"]
-    networks: [sealed]
-    read_only: true
-    tmpfs: ["/tmp:size=256m"]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    mem_limit: 2g
-    pids_limit: 512
     restart: unless-stopped
 
   egress:
@@ -91,10 +70,6 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
-
-volumes:
-  builder-workspace: {}
-  builder-state: {}
 
 networks:
   sealed: { internal: true }

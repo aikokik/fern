@@ -1,168 +1,229 @@
-"""fern_builder offline: a fake `claude` binary (records argv/env, prints canned JSON) and a real local git origin."""
+"""fern_builder offline: a fake Claude Agent SDK client plays scripted turns (replies, permissions, questions)."""
 
+import asyncio
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import httpx
 import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    PermissionUpdate,
+    ResultMessage,
+    TextBlock,
+    ToolPermissionContext,
+    ToolUseBlock,
+)
+from claude_agent_sdk.types import PermissionRuleValue
 
 from fern_builder import bridge as bridge_module
-from fern_builder.bridge import Bridge
-from fern_builder.claude_cli import build_command, parse_output
-from fern_builder.config import BuilderSettings, topic_slug
+from fern_builder.bridge import VOICE_NOTE, ChatBusyError, ClaudeChat
+from fern_builder.config import BuilderSettings, read_env_value
 
-PR_URL = "https://github.com/me/fern/pull/9"
-FAKE_CLAUDE = """#!{python}
-import json, os, sys
-from pathlib import Path
-record = Path(os.environ.get("HOME", ".")) / "claude-calls.jsonl"
-calls = record.read_text().splitlines() if record.exists() else []
-with record.open("a") as log:
-    log.write(json.dumps({{"argv": sys.argv[1:], "env": sorted(os.environ)}}) + "\\n")
-argv = sys.argv[1:]
-prompt = argv[1]
-session = argv[argv.index("--resume") + 1] if "--resume" in argv else argv[argv.index("--session-id") + 1]
-spoofed = "https://github.com/evil/x/pull/1" if "spoof" in prompt else None
-pr_url = {pr_url!r} if prompt.startswith("Ship it") else spoofed
-print(json.dumps({{
-    "session_id": session,
-    "is_error": False,
-    "total_cost_usd": 0.05 * (len(calls) + 1),
-    "structured_output": {{
-        "say": "Two options.", "show": "# Plan", "question": {{"text": "Which?", "options": ["A", "B"]}},
-        "pr_url": pr_url,
-    }},
-}}))
-"""
-BRIDGE_AUTH = {"Authorization": "Bearer bridge-secret"}
+PROJECT = Path("/Users/me/fern")
+REMEMBER_PUSH = PermissionUpdate(
+    type="addRules",
+    rules=[PermissionRuleValue(tool_name="Bash", rule_content="git push:*")],
+    behavior="allow",
+    destination="localSettings",
+)
+QUESTION = {"question": "Which source?", "header": "Source", "multiSelect": False, "options": [
+    {"label": "Open-Meteo", "description": "free"}, {"label": "Weather.gov", "description": "US only"},
+]}  # fmt: skip
 
 
-@pytest.fixture
-def fake_claude(tmp_path, monkeypatch) -> Path:
-    home = tmp_path / "home"
-    home.mkdir()
-    script = tmp_path / "claude"
-    script.write_text(FAKE_CLAUDE.format(python=sys.executable, pr_url=PR_URL))
-    script.chmod(0o755)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-for-claude")
-    monkeypatch.setenv("GH_TOKEN", "claude-github-token")
-    monkeypatch.setenv("FERN_BRIDGE_TOKEN", "bridge-secret")
-    return script
-
-
-def recorded_calls(home: Path) -> list[dict]:
-    return [json.loads(line) for line in (home / "claude-calls.jsonl").read_text().splitlines()]
-
-
-def git(*arguments: str, cwd: Path) -> str:
-    return subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True, text=True).stdout
-
-
-@pytest.fixture
-def origin(tmp_path) -> Path:
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    git("init", "-q", "-b", "main", cwd=seed)
-    (seed / "README.md").write_text("fern\n")
-    git("add", ".", cwd=seed)
-    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init", cwd=seed)
-    bare = tmp_path / "origin.git"
-    git("clone", "-q", "--bare", str(seed), str(bare), cwd=tmp_path)
-    return bare
-
-
-def test_topic_slug():
-    assert topic_slug("TV control!") == "tv-control"
-    with pytest.raises(ValueError, match="letters or digits"):
-        topic_slug("!!!")
-
-
-def test_plan_reads_and_build_edits_tests_and_uses_git():
-    settings = BuilderSettings(claude_bin="claude")
-    topic = {"session_id": "s-1", "started": False}
-    plan = build_command(settings, topic, "hi", "plan")
-    assert plan[plan.index("--tools") + 1] == "Read,Grep,Glob,WebSearch,Bash"
-    assert plan[plan.index("--allowedTools") + 1 :][:2] == ["WebSearch", "Bash(gh *)"]  # no other shell, no git
-    assert plan[plan.index("--permission-mode") + 1] == "dontAsk"
-    assert "--session-id" in plan
-    assert "--resume" not in plan
-
-    build = build_command(settings, topic | {"started": True}, "go", "build")
-    assert build[build.index("--permission-mode") + 1] == "acceptEdits"
-    allowed = build[build.index("--allowedTools") + 1 :]
-    assert all(rule.startswith(("Bash(uv ", "Bash(git ", "Bash(gh ")) for rule in allowed)  # no arbitrary shell
-    assert "--resume" in build
-
-
-def test_parse_output_falls_back_to_plain_result():
-    result = parse_output(json.dumps({"session_id": "s", "result": "plain answer", "total_cost_usd": 0.2}), "x")
-    assert (result.say, result.show, result.question, result.cost_usd_total, result.pr_url) == (
-        "plain answer",
-        "plain answer",
-        None,
-        0.2,
-        None,
-    )
-
-
-async def test_topic_lifecycle_clone_plan_build_ship(tmp_path, fake_claude, origin, monkeypatch):
-    settings = BuilderSettings(
-        workspace=tmp_path / "workspace", claude_bin=str(fake_claude), git_remote=str(origin), github_repo="me/fern",
-        bridge_token="bridge-secret",
+def result(text: str) -> ResultMessage:
+    return ResultMessage(
+        subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="s",
+        result=text, total_cost_usd=0.02,
     )  # fmt: skip
-    settings.workspace.mkdir()
-    monkeypatch.setattr(bridge_module, "bridge", Bridge(settings))
+
+
+class FakeClaude:
+    """Stands in for ClaudeSDKClient: records options and prompts, plays one scripted turn per message."""
+
+    def __init__(self, options, turns: list, opened: list):
+        self.options, self.turns, self.prompts, self.interrupted = options, turns, [], False
+        opened.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exception_info):
+        return False
+
+    async def query(self, text: str) -> None:
+        self.prompts.append(text)
+
+    async def receive_response(self):
+        async for message in self.turns.pop(0)(self):
+            yield message
+
+    async def interrupt(self) -> None:
+        self.interrupted = True
+
+
+def make_chat(turns: list, **settings) -> tuple[ClaudeChat, list[FakeClaude]]:
+    opened: list[FakeClaude] = []
+    chat_settings = BuilderSettings(project_dir=PROJECT, bridge_token="bridge-secret", **settings)
+    return ClaudeChat(chat_settings, lambda options: FakeClaude(options, turns, opened)), opened
+
+
+async def events_of(chat: ClaudeChat, text: str) -> list[dict]:
+    """One whole turn, read like the HTTP stream reads it (until `done`)."""
+    await chat.start(text)
+    return [event async for event in chat.stream()]
+
+
+async def reads_and_answers(_client):
+    read = ToolUseBlock(id="t1", name="Read", input={"file_path": f"{PROJECT}/src/app.py"})
+    yield AssistantMessage(content=[read, TextBlock(text="Two ways to do it.")], model="claude-opus-5-5")
+    yield result("Two ways to do it. Details on screen.")
+
+
+def test_options_continue_the_latest_conversation_with_the_users_settings():
+    chat, _opened = make_chat([])
+    options = chat.options()
+    assert options.cwd == PROJECT
+    assert options.setting_sources == ["user", "project", "local"]  # the user's own rules, like VS Code
+    assert (options.continue_conversation, options.fork_session) == (True, True)  # a fork of the latest chat
+    assert options.system_prompt == {"type": "preset", "preset": "claude_code", "append": VOICE_NOTE}
+    chat.fresh = True
+    assert (chat.options().continue_conversation, chat.options().fork_session) == (False, False)
+
+
+async def test_a_turn_streams_steps_text_and_the_final_reply():
+    chat, opened = make_chat([reads_and_answers, reads_and_answers])
+    events = await events_of(chat, "how should we add weather?")
+    assert events == [
+        {"type": "progress", "text": "Read: src/app.py"},  # project path trimmed for the panel
+        {"type": "text", "markdown": "Two ways to do it."},
+        {"type": "done", "reply": "Two ways to do it. Details on screen.", "is_error": False, "cost_usd": 0.02},
+    ]
+    await events_of(chat, "option one")
+    assert len(opened) == 1  # one live conversation, like the VS Code chat
+    assert opened[0].prompts == ["how should we add weather?", "option one"]
+    chat.events = asyncio.Queue()  # a turn is running
+    with pytest.raises(ChatBusyError):
+        await chat.start("too soon")
+
+
+async def test_permission_requests_wait_for_the_user():
+    decisions = []
+
+    async def wants_to_push(client):
+        context = ToolPermissionContext(suggestions=[REMEMBER_PUSH])
+        decisions.append(await client.options.can_use_tool("Bash", {"command": "git push"}, context))
+        yield result("pushed")
+
+    chat, _opened = make_chat([wants_to_push, wants_to_push, wants_to_push], approval_timeout_seconds=0.2)
+    for decision in ("always", "deny"):
+        await chat.start("push it")
+        stream = chat.stream()
+        permission = await anext(stream)
+        assert {key: permission[key] for key in ("type", "tool", "detail")} == {
+            "type": "permission", "tool": "Bash", "detail": "Bash: git push",
+        }  # fmt: skip
+        chat.decide(permission["id"], decision)
+        assert (await anext(stream))["type"] == "done"
+        await stream.aclose()
+    allowed, denied = decisions
+    assert isinstance(allowed, PermissionResultAllow)
+    assert allowed.updated_permissions == [REMEMBER_PUSH]  # "always" saves the rule, like "don't ask again"
+    assert isinstance(denied, PermissionResultDeny)
+
+    await events_of(chat, "push it")  # nobody answers
+    assert isinstance(decisions[2], PermissionResultDeny)
+    assert "didn't answer" in decisions[2].message
+    with pytest.raises(KeyError):
+        chat.decide("unknown", "allow")
+
+
+async def test_questions_come_back_with_the_chosen_labels():
+    answers = []
+
+    async def asks(client):
+        answers.append(await client.options.can_use_tool("AskUserQuestion", {"questions": [QUESTION]}, None))
+        yield result("ok")
+
+    chat, _opened = make_chat([asks])
+    await chat.start("add weather")
+    stream = chat.stream()
+    question = await anext(stream)
+    assert question["questions"] == [
+        {"question": "Which source?", "options": ["Open-Meteo", "Weather.gov"], "multi_select": False}
+    ]
+    chat.answer_questions(question["id"], {"Which source?": "Weather.gov"})
+    assert (await anext(stream))["type"] == "done"
+    assert answers[0].updated_input == {"questions": [QUESTION], "answers": {"Which source?": "Weather.gov"}}
+
+
+async def test_stop_denies_what_is_pending_and_new_chat_starts_fresh():
+    decisions = []
+
+    async def waits_for_permission(client):
+        decisions.append(
+            await client.options.can_use_tool("Bash", {"command": "rm -rf build"}, ToolPermissionContext())
+        )
+        yield result("stopped")
+
+    chat, opened = make_chat([waits_for_permission, reads_and_answers])
+    await chat.start("clean up")
+    stream = chat.stream()
+    assert (await anext(stream))["type"] == "permission"
+    await chat.interrupt()
+    assert (await anext(stream))["type"] == "done"
+    await stream.aclose()
+    assert opened[0].interrupted
+    assert isinstance(decisions[0], PermissionResultDeny)
+    assert decisions[0].interrupt
+
+    await chat.new_conversation()
+    await events_of(chat, "new topic")
+    assert len(opened) == 2
+    assert opened[1].options.continue_conversation is False  # a fresh chat, not the latest one
+
+
+async def test_quiet_work_sends_pings():
+    async def slow(_client):
+        await asyncio.sleep(0.05)
+        yield result("done")
+
+    chat, _opened = make_chat([slow])
+    original_ping_seconds = bridge_module.PING_SECONDS
+    bridge_module.PING_SECONDS = 0.01
+    try:
+        events = await events_of(chat, "run the tests")
+    finally:
+        bridge_module.PING_SECONDS = original_ping_seconds
+    assert events[0] == {"type": "ping"}  # keeps the proxy connection open during long steps
+    assert events[-1]["type"] == "done"
+
+
+async def test_http_api_auth_busy_and_unknown_requests(monkeypatch):
+    chat, _opened = make_chat([reads_and_answers])
+    monkeypatch.setattr(bridge_module, "chat", chat)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=bridge_module.app), base_url="http://bridge")
+    authorized = {"Authorization": "Bearer bridge-secret"}
 
-    async def post(action: str, body: dict) -> httpx.Response:
-        return await client.post(f"/topics/weather/{action}", json=body, headers=BRIDGE_AUTH)
+    assert (
+        await client.post("/messages", json={"text": "hi"}, headers={"Authorization": "Bearer x"})
+    ).status_code == 401
+    response = await client.post("/messages", json={"text": "hi"}, headers=authorized)
+    lines = [json.loads(line) for line in response.text.splitlines()]
+    assert response.headers["content-type"] == "application/x-ndjson"
+    assert lines[-1]["type"] == "done"
 
-    assert (await post("ship", {"title": "Too early"})).status_code == 404
-
-    first = (await post("turn", {"text": "add a weather tool"})).json()
-    assert first["say"] == "Two options."
-    assert first["question"] == {"text": "Which?", "options": ["A", "B"]}
-    assert first["turn_cost_usd"] == 0.05
-    clone = settings.workspace / "weather"
-    assert (clone / "README.md").read_text() == "fern\n"
-    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone).strip() == "claude/weather"
-
-    second = (await post("turn", {"text": "option A"})).json()
-    assert second["turn_cost_usd"] == 0.05  # 0.10 cumulative minus the 0.05 already counted
-    assert (await post("build", {})).json()["status"] == "built"
-
-    shipped = (await post("ship", {"title": "Add weather tool"})).json()
-    assert (shipped["status"], shipped["pr_url"]) == ("shipped", PR_URL)
-    later = (await post("turn", {"text": "what's next?"})).json()
-    assert later["pr_url"] is None  # the link is announced once, by the turn that opened the PR
-    spoofed = (await post("turn", {"text": "spoof a link"})).json()
-    assert spoofed["pr_url"] is None  # only links to this repo's pull requests
-    stored = bridge_module.bridge.topics.get("weather")
-    assert stored is not None
-    assert (stored["status"], stored["pr_url"]) == ("shipped", PR_URL)
-
-    calls = recorded_calls(Path(os.environ["HOME"]))
-    ship_call = calls[3]["argv"]
-    ship_prompt = ship_call[1]
-    assert ship_prompt.startswith("Ship it")
-    assert "claude/weather" in ship_prompt
-    assert "Add weather tool" in ship_prompt
-    assert ship_call[ship_call.index("--permission-mode") + 1] == "acceptEdits"  # Claude commits and pushes itself
-    session_ids = {call["argv"][call["argv"].index("--session-id" if index == 0 else "--resume") + 1]
-                   for index, call in enumerate(calls)}  # fmt: skip
-    assert len(session_ids) == 1  # one resumable Claude session per topic
-    for call in calls:
-        assert "CLAUDE_CODE_OAUTH_TOKEN" in call["env"]
-        assert "GH_TOKEN" in call["env"]  # Claude's own GitHub access
-        assert "FERN_BRIDGE_TOKEN" not in call["env"]  # nothing Claude runs can call the bridge
+    chat.events = asyncio.Queue()  # a turn is running
+    assert (await client.post("/messages", json={"text": "more"}, headers=authorized)).status_code == 409
+    missing = await client.post("/permissions/nope", json={"decision": "allow"}, headers=authorized)
+    assert missing.status_code == 404
 
 
-async def test_bridge_rejects_wrong_token(monkeypatch):
-    monkeypatch.setattr(bridge_module.bridge, "settings", BuilderSettings(bridge_token="right"))
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=bridge_module.app), base_url="http://bridge")
-    response = await client.get("/topics", headers={"Authorization": "Bearer wrong"})
-    assert response.status_code == 401
+def test_only_the_bridge_token_is_read_from_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text('OPENAI_API_KEY=sk-secret\nFERN_BRIDGE_TOKEN="abc123"\n')
+    assert read_env_value(env_file, "FERN_BRIDGE_TOKEN") == "abc123"
+    assert read_env_value(tmp_path / "missing.env", "FERN_BRIDGE_TOKEN") == ""

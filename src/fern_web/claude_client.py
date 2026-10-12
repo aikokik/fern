@@ -1,11 +1,12 @@
-"""fern_web -> Claude Code builder bridge (fern_builder.bridge), over the sealed network with the bridge token."""
+"""fern_web -> the Claude Code bridge on the Mac (fern_builder.bridge), via the egress proxy, with the bridge token."""
 
-from typing import Any
+import json
+from collections.abc import AsyncIterator
 from urllib.parse import quote
 
 import httpx
 
-BUILD_TIMEOUT_SECONDS = 1900  # a build turn may take ~30 minutes (bridge allows 1800)
+READ_TIMEOUT_SECONDS = 60  # the bridge pings every 15 s while Claude works, so a minute of silence means it's gone
 
 
 class ClaudeUnavailableError(Exception):
@@ -17,32 +18,40 @@ class ClaudeClient:
         self.configured = bool(url and token)
         self.http = httpx.AsyncClient(
             base_url=url or "http://unconfigured",
-            timeout=BUILD_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(30, read=READ_TIMEOUT_SECONDS),
             transport=transport,
             headers={"Authorization": f"Bearer {token}"},
         )
 
-    async def _call(self, method: str, path: str, json: dict | None = None) -> Any:
+    def _require_setup(self) -> None:
         if not self.configured:
             raise ClaudeUnavailableError("Claude Code isn't set up (FERN_BRIDGE_URL / FERN_BRIDGE_TOKEN)")
-        response = await self.http.request(method, path, json=json)
+
+    async def send(self, text: str) -> AsyncIterator[dict]:
+        """One Claude turn as it happens: progress, text, permission, question, ping, then done (or error)."""
+        self._require_setup()
+        async with self.http.stream("POST", "/messages", json={"text": text}) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                raise ClaudeUnavailableError(f"bridge returned {response.status_code}")
+            async for line in response.aiter_lines():
+                if line.strip():
+                    yield json.loads(line)
+
+    async def _post(self, path: str, payload: dict | None = None) -> None:
+        self._require_setup()
+        response = await self.http.post(path, json=payload or {})
         if response.status_code >= 400:
-            detail = response.json().get("detail", "") if response.content else ""
-            raise ClaudeUnavailableError(f"bridge returned {response.status_code} {detail}".strip())
-        return response.json()
+            raise ClaudeUnavailableError(f"bridge returned {response.status_code}")
 
-    async def turn(self, topic: str, text: str) -> dict:
-        return await self._call("POST", f"/topics/{_path(topic)}/turn", {"text": text})
+    async def decide(self, request_id: str, decision: str) -> None:
+        await self._post(f"/permissions/{quote(request_id, safe='')}", {"decision": decision})
 
-    async def build(self, topic: str) -> dict:
-        return await self._call("POST", f"/topics/{_path(topic)}/build", {})
+    async def answer(self, request_id: str, answers: dict[str, str]) -> None:
+        await self._post(f"/questions/{quote(request_id, safe='')}", {"answers": answers})
 
-    async def ship(self, topic: str, title: str) -> dict:
-        return await self._call("POST", f"/topics/{_path(topic)}/ship", {"title": title})
+    async def interrupt(self) -> None:
+        await self._post("/interrupt")
 
-    async def topics(self) -> list[dict]:
-        return await self._call("GET", "/topics")
-
-
-def _path(topic: str) -> str:
-    return quote(topic, safe="")  # the bridge turns it into a slug; this just keeps it one path segment
+    async def new_chat(self) -> None:
+        await self._post("/new")

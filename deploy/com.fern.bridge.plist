@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- fern's Claude Code bridge, kept running on this Mac (see docs/claude-voice.md). Install from the repo root:
+       sed -e "s|PROJECT_DIR|$PWD|g" -e "s|HOME_DIR|$HOME|g" deploy/com.fern.bridge.plist > ~/Library/LaunchAgents/com.fern.bridge.plist
+       launchctl load ~/Library/LaunchAgents/com.fern.bridge.plist
+     A login shell gives Claude the same PATH (gh, git, uv) as your terminal and VS Code. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fern.bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "PROJECT_DIR" &amp;&amp; exec uv run --extra bridge fern-bridge</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>HOME_DIR/Library/Logs/fern-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>HOME_DIR/Library/Logs/fern-bridge.log</string>
+</dict>
+</plist>

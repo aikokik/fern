@@ -1,165 +1,315 @@
-"""Bridge: fern's voice interface talks to Claude Code through this service (sealed network, bearer token).
+"""Bridge: fern's voice talks to Claude Code on this Mac, the way the VS Code chat does.
 
-POST /topics/{name}/turn   {text}   one plan-mode turn; clones the repo on branch claude/<topic> on first use
-POST /topics/{name}/build  {text?}  implement the agreed plan: edits + tests/lint
-POST /topics/{name}/ship   {title}  Claude commits, pushes claude/<topic> and opens the PR with its own gh/git
-GET  /topics                        resumable topics, newest first
+Claude works in the project folder with the user's own login, `gh`, permission rules, memories and CLAUDE.md, and
+continues their latest conversation (as a fork, so an open VS Code chat isn't touched). Whatever their settings
+would ask about is asked through fern instead: approval card on screen and "approve?" by voice. Built on the
+Claude Agent SDK, the same engine IDE integrations use.
+
+POST /messages {text}           one turn, streamed as NDJSON: progress, text, permission, question, done, ping
+POST /permissions/{id}          {decision: allow | always | deny}
+POST /questions/{id}            {answers: {question: label}}
+POST /interrupt                 stop the current turn
+POST /new                       the next message starts a fresh conversation
+GET  /healthz
 """
 
 import argparse
 import asyncio
+import json
+import logging
 import secrets
+import uuid
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import Any, Literal
 
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ResultMessage,
+    TextBlock,
+    ToolPermissionContext,
+    ToolUseBlock,
+)
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from fern_builder.claude_cli import Mode, run_turn
-from fern_builder.config import BuilderSettings, builder_settings, topic_slug
-from fern_builder.topics import TopicStore
+from fern_builder.config import BuilderSettings, builder_settings
 
-BUILD_REQUEST = (
-    "Implement the plan we agreed on now. Add or update tests, then run `uv run ruff check .`, "
-    "`uv run ruff format .`, `uv run pyright src evals tests` and `uv run pytest -q` until they pass. "
-    "In `show`, list what changed and the test results."
+log = logging.getLogger("fern_builder")
+VOICE_NOTE = (
+    "The user is talking to you by voice through fern, their household assistant. Your replies appear on a "
+    "screen and a short summary is read aloud: start each final reply with one or two plain sentences that sum it "
+    "up (no markdown), then any details. Ask for decisions with AskUserQuestion. Their words come from speech "
+    "recognition, so read past small transcription errors."
 )
+PING_SECONDS = 15  # the egress proxy closes connections after 60 s of silence
+IDLE_SECONDS = 20 * 60  # an idle conversation closes; the next message continues the latest one again
+KEY_ARGUMENT = {
+    "Bash": "command", "Read": "file_path", "Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path",
+    "Grep": "pattern", "Glob": "pattern", "WebSearch": "query", "WebFetch": "url", "Agent": "description",
+}  # fmt: skip
+Decision = Literal["allow", "always", "deny"]
 
 
-def ship_request(branch: str, title: str) -> str:
-    return (
-        f"Ship it: commit all changes on `{branch}`, push the branch, and open a pull request to main with "
-        f"`gh pr create` titled {title!r} (what changed, how it was tested). If a PR for this branch is already "
-        "open, just push. Set `pr_url` to the pull request's URL."
-    )
+class ChatBusyError(Exception):
+    pass
 
 
-class Bridge:
-    def __init__(self, settings: BuilderSettings):
+class ClaudeChat:
+    """One live Claude Code conversation. The SDK client must connect and disconnect in the same task, so a single
+    worker task owns it; HTTP handlers hand it messages and read the running turn's events."""
+
+    def __init__(self, settings: BuilderSettings, client_factory: Callable[..., Any] = ClaudeSDKClient):
         self.settings = settings
-        self.topics = TopicStore(settings.workspace / "topics.json")
-        self._locks: dict[str, asyncio.Lock] = {}
+        self.client_factory = client_factory
+        self.inbox: asyncio.Queue[str | None] = asyncio.Queue()
+        self.events: asyncio.Queue[dict] | None = None  # the running turn's stream; None when idle
+        self.pending: dict[str, tuple[asyncio.Future, str, dict, ToolPermissionContext]] = {}
+        self.client: Any = None
+        self.worker: asyncio.Task | None = None
+        self.fresh = False  # set by /new: don't continue the latest conversation
 
-    def lock(self, slug: str) -> asyncio.Lock:
-        return self._locks.setdefault(slug, asyncio.Lock())  # one Claude turn per topic at a time
-
-    async def _git(self, *arguments: str) -> None:
-        process = await asyncio.create_subprocess_exec(
-            "git", *arguments, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    def options(self) -> ClaudeAgentOptions:
+        continue_latest = not self.fresh
+        return ClaudeAgentOptions(
+            cwd=self.settings.project_dir,
+            setting_sources=["user", "project", "local"],  # the user's own rules, like VS Code
+            continue_conversation=continue_latest,
+            fork_session=continue_latest,
+            can_use_tool=self._ask_user,
+            system_prompt={"type": "preset", "preset": "claude_code", "append": VOICE_NOTE},
         )
-        _stdout, stderr = await process.communicate()
-        if process.returncode != 0:
-            raise HTTPException(502, f"git {arguments[0]} failed: {stderr.decode()[-200:]}")
 
-    async def turn(self, slug: str, text: str, mode: Mode) -> dict:
-        topic = self.topics.get(slug)
-        workdir = self.settings.workspace / slug
-        if topic is None:
-            if not workdir.exists():
-                await self._git("clone", "--quiet", self.settings.remote_url, str(workdir))
-                await self._git("-C", str(workdir), "checkout", "--quiet", "-B", f"claude/{slug}")
-            topic = self.topics.create(slug)
-        result = await run_turn(self.settings, topic, workdir, text, mode)
-        turn_cost = max(result.cost_usd_total - topic["cost_usd_total"], 0.0)  # resumed totals include past turns
-        topic |= {"started": True, "session_id": result.session_id, "cost_usd_total": result.cost_usd_total}
-        if mode == "build" and not result.is_error:
-            topic["status"] = "built"
-        pull_request_prefix = f"https://github.com/{self.settings.github_repo}/pull/"
-        shipped = bool(result.pr_url and result.pr_url.startswith(pull_request_prefix))  # only this repo's PRs
-        if shipped:
-            topic |= {"status": "shipped", "pr_url": result.pr_url}
-        self.topics.save(topic)
-        return {
-            "topic": slug,
-            "status": topic["status"],
-            "say": result.say,
-            "show": result.show,
-            "question": result.question,
-            "is_error": result.is_error,
-            "pr_url": result.pr_url if shipped else None,  # this turn's PR only, so the link shows once
-            "turn_cost_usd": round(turn_cost, 4),
-            "model_usage": result.model_usage,
-        }
+    def describe(self, tool_name: str, tool_input: dict) -> str:
+        detail = str(tool_input.get(KEY_ARGUMENT.get(tool_name, ""), "") or "")
+        detail = detail.removeprefix(f"{self.settings.project_dir}/")
+        return f"{tool_name}: {detail[:200]}" if detail else tool_name
+
+    async def start(self, text: str) -> None:
+        if self.events is not None:
+            raise ChatBusyError
+        self.events = asyncio.Queue()
+        if self.worker is None or self.worker.done():
+            self.worker = asyncio.create_task(self._run())
+        await self.inbox.put(text)
+
+    async def stream(self) -> AsyncGenerator[dict]:
+        """The running turn's events, with pings while Claude works quietly. Ends after `done` or `error`."""
+        events = self.events
+        if events is None:
+            return
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(events.get(), PING_SECONDS)
+                except TimeoutError:
+                    yield {"type": "ping"}
+                    continue
+                yield event
+                if event["type"] in ("done", "error"):
+                    return
+        finally:
+            self.events = None
+
+    async def _emit(self, event: dict) -> None:
+        if self.events is not None:
+            await self.events.put(event)
+
+    async def _run(self) -> None:
+        try:
+            async with self.client_factory(self.options()) as client:
+                self.client, self.fresh = client, False
+                while (text := await self._next_message()) is not None:
+                    await client.query(text)
+                    async for message in client.receive_response():
+                        await self._publish(message)
+        except Exception as error:
+            reference = secrets.token_hex(3)
+            log.exception("claude session failed [ref %s]", reference)
+            await self._emit({"type": "error", "message": type(error).__name__, "reference": reference})
+        finally:
+            self.client = None
+            self._deny_pending("The conversation ended.")
+            if not self.inbox.empty():  # a message arrived while this session was closing: serve it in a new one
+                self.worker = asyncio.create_task(self._run())
+
+    async def _next_message(self) -> str | None:
+        try:
+            return await asyncio.wait_for(self.inbox.get(), IDLE_SECONDS)
+        except TimeoutError:
+            return None
+
+    async def _publish(self, message: Any) -> None:
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text.strip():
+                    await self._emit({"type": "text", "markdown": block.text})
+                elif isinstance(block, ToolUseBlock) and block.name != "AskUserQuestion":
+                    await self._emit({"type": "progress", "text": self.describe(block.name, block.input)})
+        elif isinstance(message, ResultMessage):
+            done = {"reply": message.result or "", "is_error": message.is_error, "cost_usd": message.total_cost_usd}
+            await self._emit({"type": "done", **done})
+
+    async def _ask_user(self, tool_name: str, tool_input: dict, context: ToolPermissionContext) -> Any:
+        """Called by the SDK whenever the user's settings would ask: forward to fern and wait for the answer."""
+        request_id = uuid.uuid4().hex
+        answer = asyncio.get_running_loop().create_future()
+        self.pending[request_id] = (answer, tool_name, tool_input, context)
+        if tool_name == "AskUserQuestion":
+            questions = [
+                {
+                    "question": question["question"],
+                    "options": [option["label"] for option in question.get("options", [])],
+                    "multi_select": bool(question.get("multiSelect")),
+                }
+                for question in tool_input.get("questions", [])
+            ]
+            await self._emit({"type": "question", "id": request_id, "questions": questions})
+        else:
+            detail = self.describe(tool_name, tool_input)
+            await self._emit({"type": "permission", "id": request_id, "tool": tool_name, "detail": detail})
+        try:
+            return await asyncio.wait_for(answer, self.settings.approval_timeout_seconds)
+        except TimeoutError:
+            return PermissionResultDeny(message="The user didn't answer in time.")
+        finally:
+            self.pending.pop(request_id, None)
+
+    def _take(self, request_id: str) -> tuple[asyncio.Future, str, dict, ToolPermissionContext]:
+        if (entry := self.pending.get(request_id)) is None or entry[0].done():
+            raise KeyError(request_id)
+        return entry
+
+    def decide(self, request_id: str, decision: Decision) -> None:
+        answer, _tool_name, tool_input, context = self._take(request_id)
+        if decision == "deny":
+            answer.set_result(PermissionResultDeny(message="The user said no."))
+            return
+        # "always" saves the CLI's suggested rule to .claude/settings.local.json, like VS Code's "don't ask again".
+        remember = [rule for rule in context.suggestions if rule.destination == "localSettings"]
+        answer.set_result(
+            PermissionResultAllow(
+                updated_input=tool_input, updated_permissions=remember if decision == "always" else None
+            )
+        )
+
+    def answer_questions(self, request_id: str, answers: dict[str, str | list[str]]) -> None:
+        answer, tool_name, tool_input, _context = self._take(request_id)
+        if tool_name != "AskUserQuestion":
+            raise KeyError(request_id)
+        answer.set_result(
+            PermissionResultAllow(updated_input={"questions": tool_input.get("questions", []), "answers": answers})
+        )
+
+    def _deny_pending(self, reason: str) -> None:
+        for answer, *_rest in list(self.pending.values()):
+            if not answer.done():
+                answer.set_result(PermissionResultDeny(message=reason, interrupt=True))
+
+    async def interrupt(self) -> None:
+        self._deny_pending("The user stopped this.")
+        if self.client is not None and self.events is not None:  # only a running turn can be stopped
+            await self.client.interrupt()
+
+    async def new_conversation(self) -> None:
+        self.fresh = True
+        if self.worker is not None and not self.worker.done():
+            await self.inbox.put(None)  # closes after the current turn; the next message starts fresh
 
 
-bridge = Bridge(builder_settings)
+chat = ClaudeChat(builder_settings)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     if not builder_settings.bridge_token:
-        raise RuntimeError("Set FERN_BRIDGE_TOKEN")
-    builder_settings.workspace.mkdir(parents=True, exist_ok=True)
+        raise RuntimeError("Set FERN_BRIDGE_TOKEN in .env")
     yield
+    if chat.worker is not None:
+        chat.worker.cancel()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 def caller(authorization: str = Header("")) -> None:
-    if not secrets.compare_digest(authorization.removeprefix("Bearer "), bridge.settings.bridge_token):
+    expected = chat.settings.bridge_token
+    if not expected or not secrets.compare_digest(authorization.removeprefix("Bearer "), expected):
         raise HTTPException(401)
 
 
-class Turn(BaseModel):
+class Message(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
-class Build(BaseModel):
-    text: str = Field(default=BUILD_REQUEST, max_length=8000)
+class PermissionAnswer(BaseModel):
+    decision: Decision
 
 
-class Ship(BaseModel):
-    title: str = Field(min_length=3, max_length=120)
+class QuestionAnswers(BaseModel):
+    answers: dict[str, str | list[str]]
 
 
-def slug_of(name: str) -> str:
+async def ndjson(events: AsyncIterator[dict]) -> AsyncIterator[str]:
+    async for event in events:
+        yield json.dumps(event) + "\n"
+
+
+@app.post("/messages", dependencies=[Depends(caller)])
+async def send_message(body: Message) -> StreamingResponse:
     try:
-        return topic_slug(name)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from None
+        await chat.start(body.text)
+    except ChatBusyError:
+        raise HTTPException(409, "Claude is still working on the last message") from None
+    return StreamingResponse(ndjson(chat.stream()), media_type="application/x-ndjson")
 
 
-@app.post("/topics/{name}/turn", dependencies=[Depends(caller)])
-async def plan_turn(name: str, body: Turn) -> dict:
-    slug = slug_of(name)
-    async with bridge.lock(slug):
-        return await bridge.turn(slug, body.text, "plan")
+@app.post("/permissions/{request_id}", dependencies=[Depends(caller)])
+async def decide_permission(request_id: str, body: PermissionAnswer) -> dict:
+    try:
+        chat.decide(request_id, body.decision)
+    except KeyError:
+        raise HTTPException(404, "No such pending request") from None
+    return {"ok": True}
 
 
-@app.post("/topics/{name}/build", dependencies=[Depends(caller)])
-async def build(name: str, body: Build) -> dict:
-    slug = slug_of(name)
-    async with bridge.lock(slug):
-        if bridge.topics.get(slug) is None:
-            raise HTTPException(404, "unknown topic: plan it first")
-        return await bridge.turn(slug, body.text, "build")
+@app.post("/questions/{request_id}", dependencies=[Depends(caller)])
+async def answer_questions(request_id: str, body: QuestionAnswers) -> dict:
+    try:
+        chat.answer_questions(request_id, body.answers)
+    except KeyError:
+        raise HTTPException(404, "No such pending question") from None
+    return {"ok": True}
 
 
-@app.post("/topics/{name}/ship", dependencies=[Depends(caller)])
-async def ship(name: str, body: Ship) -> dict:
-    slug = slug_of(name)
-    async with bridge.lock(slug):
-        topic = bridge.topics.get(slug)
-        if topic is None:
-            raise HTTPException(404, "unknown topic: plan it first")
-        return await bridge.turn(slug, ship_request(topic["branch"], body.title), "build")
+@app.post("/interrupt", dependencies=[Depends(caller)])
+async def interrupt() -> dict:
+    await chat.interrupt()
+    return {"ok": True}
 
 
-@app.get("/topics", dependencies=[Depends(caller)])
-async def topics() -> list[dict]:
-    return bridge.topics.all()
+@app.post("/new", dependencies=[Depends(caller)])
+async def new_conversation() -> dict:
+    await chat.new_conversation()
+    return {"ok": True}
 
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"bridge": True}
+    return {"bridge": True, "working": chat.events is not None}
 
 
 def main() -> None:
     import uvicorn
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="fern-bridge")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="127.0.0.1")  # this Mac only; Docker reaches it via host.docker.internal
     parser.add_argument("--port", type=int, default=8770)
     arguments = parser.parse_args()
     uvicorn.run("fern_builder.bridge:app", host=arguments.host, port=arguments.port)

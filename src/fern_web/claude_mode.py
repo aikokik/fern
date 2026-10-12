@@ -1,14 +1,15 @@
-"""Claude mode for a voice session: the user's words go to Claude Code (through the builder bridge) instead of
-fern's brain. Only Claude's short `say` text is spoken; plans and details go to the screen as markdown, and its
-question shows as tappable options (or answer by voice: "option 2", "the first one").
+"""Claude mode for a voice session: talk to Claude Code like in the VS Code chat, through the bridge on the Mac.
+
+Claude's steps and replies stream to the screen; the voice speaks a short gist. When Claude needs permission or asks
+a question, the user hears it and answers by voice ("yes", "option 2") or by tapping, like VS Code's prompts.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ OPTION_ANSWER = re.compile(
     r"^\s*(?:option|number|the)?\s*(\d|one|two|three|four|first|second|third|fourth)\b(?:\s+(?:one|option))?\s*[.!]?\s*$",
     re.I,
 )
+PULL_REQUEST_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
 
 class ClaudeMode:
@@ -44,33 +46,29 @@ class ClaudeMode:
         self.allowed_devices = allowed_devices
         self.household_facts = household_facts
         self.active = False
-        self.topic = ""
-        self.last_question: dict | None = None
-        self._lock = asyncio.Lock()  # one Claude request at a time; topics are conversations, not job queues
+        self.working = False  # a Claude turn is running
+        self.permission: dict | None = None  # what Claude is waiting for the user to approve
+        self.question: dict | None = None  # Claude's open questions: {id, questions, answers}
 
     async def handle(self, name: str, call_id: str, arguments: dict) -> None:
         if name == "switch_backend":
-            await self._switch(call_id, arguments.get("target", ""), (arguments.get("topic") or "").strip())
+            await self._switch(call_id, arguments.get("target", ""))
         elif not self.active:
             await self.session.send_tool_output(call_id, "Not talking to Claude. Call switch_backend to claude first.")
+        elif name == "ask_claude" and self.question:
+            await self.session.send_tool_output(call_id, await self._answer_question(arguments.get("request", "")))
+        elif name == "ask_claude" and self.working:
+            await self.session.send_tool_output(call_id, "Claude is still working. Say 'stop' to interrupt it.")
         elif name == "ask_claude":
-            text = self._resolve_option(arguments.get("request", ""))
-            await self._reply_to_tool(call_id, lambda: self.client.turn(self.topic, text))
-        elif arguments.get("action") == "build":
-            await self._reply_to_tool(call_id, lambda: self.client.build(self.topic))
-        elif arguments.get("action") == "ship":
-            title = (arguments.get("title") or "").strip() or f"{self.topic}: built with Claude Code by voice"
-            await self._reply_to_tool(call_id, lambda: self.client.ship(self.topic, title))
+            await self._turn(call_id, arguments.get("request", ""))
+        elif arguments.get("action") == "stop":
+            await self._call_bridge(self.client.interrupt)
+            await self.session.send_tool_output(call_id, "Stopping Claude.")
         else:
-            await self._reply_to_tool(call_id, self._topics)
+            await self._call_bridge(self.client.new_chat)
+            await self.session.send_tool_output(call_id, "The next message starts a new chat with Claude.")
 
-    async def answer_from_screen(self, text: str) -> None:
-        """A tapped option or typed answer: same as speaking it, but the reply is injected (no tool call to answer)."""
-        reply = await self._request(lambda: self.client.turn(self.topic, self._resolve_option(text)))
-        if reply is not None:
-            await self.session.say(f"Rephrase Claude's reply as instructed:\n{self._spoken(reply)}")
-
-    async def _switch(self, call_id: str, target: str, topic: str) -> None:
+    async def _switch(self, call_id: str, target: str) -> None:
         if target == "fern":
             self.active = False
             await self._apply("fern")
@@ -82,99 +80,142 @@ class ClaudeMode:
         if self.allowed_devices and self.device not in self.allowed_devices:
             await self.session.send_tool_output(call_id, "This device isn't allowed to use Claude Code. Tell the user.")
             return
-        topic = topic or self.topic
-        if not topic:
-            await self.session.send_tool_output(
-                call_id, "Ask the user for a short topic name (like 'weather tool'), then call switch_backend again."
-            )
-            return
-        self.active, self.topic, self.last_question = True, topic, None
+        self.active = True
         await self._apply("claude")
-        await self.session.send_tool_output(call_id, f"Switched to Claude Code, topic {topic}. Say so in a few words.")
+        await self.session.send_tool_output(call_id, "Switched to Claude Code. Say so in a few words.")
 
     async def _apply(self, mode: Mode) -> None:
-        await self.session.update_instructions(instructions_for(mode, self.topic, self.household_facts))
-        await self.session.browser_events.put(
-            {"type": "mode", "mode": mode, "topic": self.topic if mode == "claude" else ""}
-        )
+        await self.session.update_instructions(instructions_for(mode, self.household_facts))
+        await self.session.browser_events.put({"type": "mode", "mode": mode})
 
-    def _resolve_option(self, text: str) -> str:
-        """'option 2' / 'the second one' -> the option's label, so Claude gets a real answer."""
-        question, match = self.last_question, OPTION_ANSWER.match(text)
-        if not (question and match):
-            return text
-        token = match.group(1).lower()
-        index = int(token) if token.isdigit() else OPTION_WORDS[token]
-        if not 1 <= index <= len(question["options"]):
-            return text
-        self.last_question = None
-        return f'My answer to "{question["text"]}": {question["options"][index - 1]}'
-
-    async def _topics(self) -> dict:
-        topics = await self.client.topics()
-        lines = [
-            f"- **{topic['slug']}**: {topic['status']}" + (f" · {topic['pr_url']}" if topic.get("pr_url") else "")
-            for topic in topics
-        ]
-        say = f"{len(topics)} topics, they're on screen." if topics else "No topics yet."
-        return {"say": say, "show": "\n".join(lines), "question": None}
-
-    async def _reply_to_tool(self, call_id: str, request: Callable[[], Awaitable[dict]]) -> None:
-        reply = await self._request(request)
-        if reply is None:
+    async def _turn(self, call_id: str, text: str) -> None:
+        """One Claude turn. The tool call stays open until Claude is done; questions and permission requests in
+        between are put to the user as notices."""
+        self.working = True
+        final: dict | None = None
+        try:
+            async with self.session.handling("claude"):
+                await self.session.browser_events.put({"type": "claude_turn", "text": text})
+                async for event in self.client.send(text):
+                    final = await self._on_event(event) or final
+        except Exception as error:
+            final = {"type": "error", "message": _describe(error), "reference": secrets.token_hex(3)}
+        finally:
+            self.working, self.permission, self.question = False, None, None
+        if final is None or final["type"] == "error":
+            failure = final or {"message": "no reply", "reference": secrets.token_hex(3)}
+            log.warning("claude turn failed [ref %s]: %s", failure["reference"], failure["message"])
+            await self.session.browser_events.put({"type": "error", **failure})
             await self.session.send_tool_output(
-                call_id, "Claude Code failed. Tell the user to check the reference on screen."
+                call_id, f"Claude Code failed. Tell the user, with reference {failure['reference']}."
             )
             return
-        await self.session.send_tool_output(call_id, self._spoken(reply))
+        for url in dict.fromkeys(PULL_REQUEST_LINK.findall(final["reply"])):
+            await self.session.browser_events.put({"type": "claude_link", "label": "Pull request", "url": url})
+        await self.session.send_tool_output(call_id, spoken(final["reply"]))
 
-    async def _request(self, request: Callable[[], Awaitable[dict]]) -> dict | None:
-        if self._lock.locked():  # e.g. a build that takes minutes: answer now instead of queueing
-            return {"say": "Claude is still working on the previous request. Try again when it's done."}
+    async def _on_event(self, event: dict) -> dict | None:
+        """Panel updates and prompts for the user; returns the turn's final event (done/error)."""
+        match event["type"]:
+            case "progress":
+                await self.session.browser_events.put({"type": "claude_progress", "text": event["text"]})
+            case "text":
+                await self.session.browser_events.put({"type": "claude_text", "markdown": event["markdown"]})
+            case "permission":
+                self.permission = event
+                self.session.awaiting_since = time.monotonic()  # only a "yes" spoken after this question counts
+                card = {"type": "claude_permission", "id": event["id"], "detail": event["detail"]}
+                await self.session.browser_events.put(card)
+                await self.session.say(f"Notice: Claude wants permission for {event['detail']}. Ask the user: approve?")
+            case "question":
+                self.question = {"id": event["id"], "questions": event["questions"], "answers": {}}
+                await self._put_question()
+            case "done" | "error":
+                return event
+        return None
+
+    async def _put_question(self) -> None:
+        assert self.question is not None
+        current = self.question["questions"][len(self.question["answers"])]
+        await self.session.browser_events.put(
+            {"type": "claude_question", "text": current["question"], "options": current["options"]}
+        )
+        await self.session.say(f"Notice: Claude asks: {current['question']} {spoken_options(current['options'])}")
+
+    async def _answer_question(self, text: str) -> str:
+        """The user's answer to Claude's current question: 'option 2' becomes its label, anything else goes as is."""
+        assert self.question is not None
+        question = self.question
+        current = question["questions"][len(question["answers"])]
+        question["answers"][current["question"]] = chosen_label(text, current["options"]) or text.strip()
+        if len(question["answers"]) < len(question["questions"]):
+            await self._put_question()
+            return "Noted. Ask the next question."
+        self.question = None
+        await self._call_bridge(lambda: self.client.answer(question["id"], question["answers"]))
+        await self.session.browser_events.put({"type": "claude_question_answered"})
+        return "Answer sent to Claude."
+
+    async def decide(self, approve: bool, always: bool = False) -> str:
+        """The user's answer to Claude's permission request (spoken or tapped). Returns what to tell the voice."""
+        if self.permission is None:
+            return "Claude isn't waiting for permission."
+        permission, self.permission = self.permission, None
+        decision = "always" if approve and always else "allow" if approve else "deny"
+        await self._call_bridge(lambda: self.client.decide(permission["id"], decision))
+        await self.session.browser_events.put({"type": "claude_permission_resolved", "decision": decision})
+        return "Approved. Claude continues." if approve else "Rejected. Claude will adjust."
+
+    async def answer_from_screen(self, text: str) -> None:
+        """A tapped option: same as saying it."""
+        if self.question:
+            await self.session.say(f"Notice: the user answered on screen. {await self._answer_question(text)}")
+
+    async def decide_from_screen(self, decision: str) -> None:
+        reply = await self.decide(decision != "deny", always=decision == "always")
+        await self.session.say(f"Notice: the user answered on screen. {reply}")
+
+    async def end(self) -> None:
+        """The voice call ended: nobody can answer Claude's open prompt anymore, so stop that turn."""
+        if self.permission or self.question:
+            await self._call_bridge(self.client.interrupt)
+
+    async def _call_bridge(self, request: Callable[[], Awaitable[None]]) -> None:
         try:
-            async with self._lock, self.session.handling("claude"):
-                reply = await request()
+            await request()
         except Exception as error:
             reference = secrets.token_hex(3)
-            log.warning("claude request failed [ref %s]: %s", reference, type(error).__name__)
-            message = str(error)[:120] if isinstance(error, ClaudeUnavailableError) else type(error).__name__
-            await self.session.browser_events.put({"type": "error", "message": message, "reference": reference})
-            return None
-        await self._publish(reply)
-        return reply
-
-    async def _publish(self, reply: dict) -> None:
-        """One panel update per reply: new markdown (if any) and the current question (None clears the old one)."""
-        self.last_question = reply.get("question") or None
-        panel_update = {
-            "type": "claude_reply",
-            "say": reply.get("say") or "",
-            "markdown": reply.get("show") or "",
-            "question": self.last_question,
-        }
-        await self.session.browser_events.put(panel_update)
-        if reply.get("pr_url"):
+            log.warning("claude bridge call failed [ref %s]: %s", reference, _describe(error))
             await self.session.browser_events.put(
-                {"type": "claude_link", "label": "Pull request", "url": reply["pr_url"]}
+                {"type": "error", "message": _describe(error), "reference": reference}
             )
 
-    def _spoken(self, reply: dict) -> str:
-        """For the voice to rephrase (see CLAUDE_MODE): a short gist and the question; the panel has everything."""
-        say = reply.get("say") or ""
-        gist = summary(say) or "Done."
-        lines = [f"Claude's answer: {gist}"]
-        if gist != say or reply.get("show"):
-            lines.append("More detail is on screen.")
-        if reply.get("pr_url"):
-            lines.append("The pull request link is on screen.")
-        if question := reply.get("question"):
-            labels = question["options"]
-            if all(len(label) <= SPOKEN_OPTION_CHARS for label in labels):
-                options = " ".join(f"Option {number}: {label}." for number, label in enumerate(labels, 1))
-            else:
-                options = f"{len(labels)} options are on screen; answer with a number."
-            lines.append(f"Question: {summary(question['text'])} {options}")
-        return "\n".join(lines)
+
+def _describe(error: Exception) -> str:
+    return str(error)[:120] if isinstance(error, ClaudeUnavailableError) else type(error).__name__
+
+
+def chosen_label(text: str, options: list[str]) -> str | None:
+    """'option 2' / 'the second one' -> that option's label."""
+    if not (match := OPTION_ANSWER.match(text)):
+        return None
+    token = match.group(1).lower()
+    index = int(token) if token.isdigit() else OPTION_WORDS[token]
+    return options[index - 1] if 1 <= index <= len(options) else None
+
+
+def spoken_options(labels: list[str]) -> str:
+    if all(len(label) <= SPOKEN_OPTION_CHARS for label in labels):
+        return " ".join(f"Option {number}: {label}." for number, label in enumerate(labels, 1))
+    return f"{len(labels)} options are on screen; answer with a number."
+
+
+def spoken(reply: str) -> str:
+    """For the voice to rephrase (see CLAUDE_MODE): a short gist; the panel has everything."""
+    first_paragraph = reply.strip().split("\n\n", 1)[0]
+    gist = summary(first_paragraph) or "Done."
+    more = "\nMore detail is on screen." if gist != reply.strip() else ""
+    return f"Claude's answer: {gist}{more}"
 
 
 def summary(text: str) -> str:

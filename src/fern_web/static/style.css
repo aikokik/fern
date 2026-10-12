@@ -49,8 +49,11 @@ body[data-state="connecting"] #mic { opacity: .6; }
 #log p { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; max-width: 85%; }
 #log .you { background: var(--card); margin-left: auto; }
 #log small { display: block; font-size: .7rem; color: var(--muted); }
-#claude-say { font-weight: 500; }
-#claude-say:empty { display: none; }
+#claude-steps { margin: 10px 0 0; padding-left: 1.2rem; color: var(--muted); font: .8rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#claude-steps li { overflow-wrap: anywhere; }
+#claude-steps:empty, #claude-permission:empty { display: none; }
+#claude-permission { border-top: 1px solid var(--line); margin-top: 10px; }
+.claude-you { color: var(--muted); font-style: italic; }
 #log .fern { border: 1px solid var(--line); }
 
 /* usage page */

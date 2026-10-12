@@ -8,6 +8,7 @@ import json
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -206,11 +207,28 @@ class ClaudeAnswer(BaseModel):
 
 @app.post("/realtime/claude", status_code=202)
 async def answer_claude(body: ClaudeAnswer, device_token: str = Depends(bearer_token)) -> dict:
-    """A tapped option for Claude. Claude's reply comes back through the voice session (spoken + panel)."""
+    """A tapped option for Claude's question. Claude carries on; its reply comes back through the voice session."""
     voice_session = owned_session(body.session_id, device_token)
-    if not voice_session.claude.active:
-        raise HTTPException(409, "Not talking to Claude")
+    if not voice_session.claude.question:
+        raise HTTPException(409, "Claude isn't asking anything")
     voice_session.answer_claude_from_screen(body.text)
+    return {"accepted": True}
+
+
+class ClaudePermission(BaseModel):
+    session_id: str
+    permission_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    decision: Literal["allow", "always", "deny"]
+
+
+@app.post("/realtime/claude/permission", status_code=202)
+async def decide_claude_permission(body: ClaudePermission, device_token: str = Depends(bearer_token)) -> dict:
+    """A tapped Approve / Always / Reject on Claude's permission card, like VS Code's prompt."""
+    voice_session = owned_session(body.session_id, device_token)
+    waiting = voice_session.claude.permission
+    if waiting is None or waiting["id"] != body.permission_id:
+        raise HTTPException(409, "Claude isn't waiting for that")
+    voice_session.decide_claude_from_screen(body.decision)
     return {"accepted": True}
 
 

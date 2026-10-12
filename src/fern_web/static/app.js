@@ -4,7 +4,8 @@ let deviceToken = localStorage.getItem("fern-token") || "";
 let peerConnection = null;
 let microphone = null;
 let sessionId = null;
-let talkingTo = "fern";  // who answers in the voice: fern, or Claude (relayed by the same voice)
+let talkingTo = "fern";
+const MAX_CLAUDE_STEPS = 20;  // who answers in the voice: fern, or Claude (relayed by the same voice)
 
 const api = (path, body) => fetch(path, {
   method: body === undefined ? "GET" : "POST",
@@ -102,51 +103,94 @@ function onFernEvent(event) {
   else if (event.type === "command" && event.command.type === "alarm.set") showAlarmCard(event.command);
   else if (event.type === "mode") showMode(event);
   else if (event.type === "working") showWorking(event.by);
-  else if (event.type === "claude_reply") showClaudeReply(event);
+  else if (event.type === "claude_turn") startClaudeTurn(event.text);
+  else if (event.type === "claude_progress") addClaudeStep(event.text);
+  else if (event.type === "claude_text") addClaudeText(event.markdown);
+  else if (event.type === "claude_permission") showClaudePermission(event);
+  else if (event.type === "claude_permission_resolved") resolveClaudePermission(event.decision);
+  else if (event.type === "claude_question") showClaudeQuestion(event);
+  else if (event.type === "claude_question_answered") element("#claude-question").replaceChildren();
   else if (event.type === "claude_link") addClaudeLink(event);
 }
 
 function showWorking(handler) {
   if (!sessionId) return;
-  const working = { fern: "fern's brain is working…", claude: "Claude is thinking…" }[handler];
+  const working = { fern: "fern's brain is working…", claude: "Claude is working…" }[handler];
   setState("live", working || "Listening…");
 }
 
 function showMode(event) {
-  talkingTo = event.mode === "claude" ? "Claude" : "fern";
   const talkingToClaude = event.mode === "claude";
+  talkingTo = talkingToClaude ? "Claude" : "fern";
   element("#mode").hidden = !talkingToClaude;
-  element("#mode").textContent = talkingToClaude ? `Claude · ${event.topic}` : "";
-  element("#claude-question").replaceChildren();  // only answerable while talking to Claude
-  if (!talkingToClaude) return;  // keep the last plan and links readable after switching back
-  element("#claude-say").textContent = "";
-  element("#claude-plan").replaceChildren();
-  element("#claude-links").replaceChildren();
-  element("#claude-panel").hidden = false;
+  element("#mode").textContent = talkingToClaude ? "Claude" : "";
+  if (talkingToClaude) element("#claude-panel").hidden = false;  // the conversation stays readable afterwards
 }
 
-function showClaudeReply(reply) {
-  element("#claude-say").textContent = reply.say;  // the voice only speaks a summary of this
-  if (reply.markdown) renderMarkdown(element("#claude-plan"), reply.markdown);
-  const questionBox = element("#claude-question");
-  questionBox.replaceChildren();
-  if (!reply.question) return;
+// Like the VS Code chat: each turn shows your words, Claude's steps as they happen, its text, and any prompt.
+function startClaudeTurn(text) {
+  for (const part of ["#claude-steps", "#claude-plan", "#claude-permission", "#claude-question", "#claude-links"]) {
+    element(part).replaceChildren();
+  }
+  const request = document.createElement("p");
+  request.className = "claude-you";
+  request.textContent = text;
+  element("#claude-plan").append(request);
+}
+
+function addClaudeStep(text) {
+  const steps = element("#claude-steps");
+  steps.appendChild(document.createElement("li")).textContent = text;
+  while (steps.children.length > MAX_CLAUDE_STEPS) steps.firstElementChild.remove();
+}
+
+function addClaudeText(markdown) {
+  const block = document.createElement("div");
+  renderMarkdown(block, markdown);
+  element("#claude-plan").append(block);
+}
+
+function promptWithButtons(container, text, choices) {
+  container.replaceChildren();
   const prompt = document.createElement("p");
-  prompt.textContent = reply.question.text;
+  prompt.textContent = text;
   const buttons = document.createElement("div");
   buttons.className = "option-buttons";
-  reply.question.options.forEach((label, index) => {
+  for (const { label, primary, onChoose } of choices) {
     const button = document.createElement("button");
-    button.className = "ghost";
-    button.textContent = `${index + 1}. ${label}`;
+    button.textContent = label;
+    button.className = primary ? "" : "ghost";
     button.onclick = async () => {
       buttons.remove();
-      const response = await api("/realtime/claude", { session_id: sessionId, text: `option ${index + 1}` });
-      prompt.textContent += response.ok ? ` → ${label}` : " (couldn't send, answer by voice)";
+      if (!(await onChoose()).ok) prompt.textContent += " (couldn't send, answer by voice)";
     };
     buttons.append(button);
-  });
-  questionBox.append(prompt, buttons);
+  }
+  container.append(prompt, buttons);
+}
+
+function showClaudePermission(request) {
+  const decide = (decision) => () =>
+    api("/realtime/claude/permission", { session_id: sessionId, permission_id: request.id, decision });
+  promptWithButtons(element("#claude-permission"), `Allow ${request.detail}?`, [
+    { label: "Approve", primary: true, onChoose: decide("allow") },
+    { label: "Always", onChoose: decide("always") },
+    { label: "Reject", onChoose: decide("deny") },
+  ]);
+}
+
+function resolveClaudePermission(decision) {
+  const box = element("#claude-permission");
+  box.querySelector(".option-buttons")?.remove();
+  const prompt = box.querySelector("p");
+  if (prompt) prompt.textContent += { allow: " ✓ approved", always: " ✓ always allowed", deny: " ✗ rejected" }[decision];
+}
+
+function showClaudeQuestion(question) {
+  promptWithButtons(element("#claude-question"), question.text, question.options.map((label, index) => ({
+    label: `${index + 1}. ${label}`,
+    onChoose: () => api("/realtime/claude", { session_id: sessionId, text: `option ${index + 1}` }),
+  })));
 }
 
 function addClaudeLink(event) {

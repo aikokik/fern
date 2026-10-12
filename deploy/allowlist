@@ -2,8 +2,4 @@
 ^api\.anthropic\.com$
 ^api\.github\.com$
 ^ntfy\.sh$
-^claude\.ai$
-^platform\.claude\.com$
-^github\.com$
-^pypi\.org$
-^files\.pythonhosted\.org$
+^host\.docker\.internal$
