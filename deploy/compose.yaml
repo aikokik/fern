@@ -43,21 +43,19 @@ services:
     pids_limit: 64
     restart: unless-stopped
 
-  # Claude Code CLI on your Pro/Max plan + the bridge fern_web talks to. Has no GitHub token and can't see .env
-  # or data/; Claude's own processes get only CLAUDE_CODE_OAUTH_TOKEN (fern_builder/claude_cli.py CHILD_ENV).
+  # Claude Code CLI on your Pro/Max plan + the bridge fern_web talks to. Can't see .env or data/. Claude's processes
+  # get only its Claude token and its own GitHub token (fern_builder/claude_cli.py CHILD_ENV), not the bridge token.
   builder:
     build: { context: .., dockerfile: deploy/Dockerfile.builder }
     command: ["fern-bridge", "--host", "0.0.0.0", "--port", "8770"]
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      GH_TOKEN: ${FERN_BUILDER_GITHUB_TOKEN:-}  # Claude's gh + git: fine-grained, this repo only
+      FERN_GITHUB_REPO: ${FERN_GITHUB_REPO:-aikokik/fern}
       FERN_CLAUDE_MODEL: ${FERN_CLAUDE_MODEL:-sonnet}
       FERN_BRIDGE_TOKEN: ${FERN_BRIDGE_TOKEN:-}
-      FERN_SHIPPER_TOKEN: ${FERN_SHIPPER_TOKEN:-}
-      FERN_SHIPPER_URL: http://shipper:8771
-      FERN_GITHUB_TOOLS_TOKEN: ${FERN_GITHUB_TOOLS_TOKEN:-}  # Claude's fern-github: shipper /github calls only
       HTTPS_PROXY: http://egress:8888
       HTTP_PROXY: http://egress:8888
-      NO_PROXY: shipper
     volumes: ["builder-workspace:/workspace", "builder-state:/state"]
     networks: [sealed]
     read_only: true
@@ -66,27 +64,6 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 2g
     pids_limit: 512
-    restart: unless-stopped
-
-  # The only container with the GitHub token. Owns the git clones; only pushes claude/* branches.
-  shipper:
-    build: { context: .., dockerfile: deploy/Dockerfile.builder }
-    command: ["fern-shipper", "--host", "0.0.0.0", "--port", "8771"]
-    environment:
-      FERN_BUILDER_GITHUB_TOKEN: ${FERN_BUILDER_GITHUB_TOKEN:-}
-      FERN_GITHUB_REPO: ${FERN_GITHUB_REPO:-aikokik/fern}
-      FERN_SHIPPER_TOKEN: ${FERN_SHIPPER_TOKEN:-}
-      FERN_GITHUB_TOOLS_TOKEN: ${FERN_GITHUB_TOOLS_TOKEN:-}
-      HTTPS_PROXY: http://egress:8888
-      HTTP_PROXY: http://egress:8888
-    volumes: ["builder-workspace:/workspace", "shipper-repos:/repos"]
-    networks: [sealed]
-    read_only: true
-    tmpfs: ["/tmp:size=64m"]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    mem_limit: 512m
-    pids_limit: 128
     restart: unless-stopped
 
   egress:
@@ -118,7 +95,6 @@ services:
 volumes:
   builder-workspace: {}
   builder-state: {}
-  shipper-repos: {}
 
 networks:
   sealed: { internal: true }

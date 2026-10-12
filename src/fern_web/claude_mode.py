@@ -160,13 +160,13 @@ class ClaudeMode:
 
     def _spoken(self, reply: dict) -> str:
         """For the voice to rephrase (see CLAUDE_MODE): a short gist and the question; the panel has everything."""
-        if reply.get("status") == "shipped":
-            return "Claude shipped it. The pull request link is on screen."
         say = reply.get("say") or ""
         gist = summary(say) or "Done."
         lines = [f"Claude's answer: {gist}"]
         if gist != say or reply.get("show"):
             lines.append("More detail is on screen.")
+        if reply.get("pr_url"):
+            lines.append("The pull request link is on screen.")
         if question := reply.get("question"):
             labels = question["options"]
             if all(len(label) <= SPOKEN_OPTION_CHARS for label in labels):

@@ -1,8 +1,8 @@
 """Bridge: fern's voice interface talks to Claude Code through this service (sealed network, bearer token).
 
-POST /topics/{name}/turn   {text}   one plan-mode turn (read-only); creates the topic on first use
-POST /topics/{name}/build  {text?}  implement the agreed plan: edits + tests/lint only
-POST /topics/{name}/ship   {title}  shipper commits, pushes claude/<topic>, opens the PR
+POST /topics/{name}/turn   {text}   one plan-mode turn; clones the repo on branch claude/<topic> on first use
+POST /topics/{name}/build  {text?}  implement the agreed plan: edits + tests/lint
+POST /topics/{name}/ship   {title}  Claude commits, pushes claude/<topic> and opens the PR with its own gh/git
 GET  /topics                        resumable topics, newest first
 """
 
@@ -11,7 +11,6 @@ import asyncio
 import secrets
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -26,37 +25,48 @@ BUILD_REQUEST = (
 )
 
 
+def ship_request(branch: str, title: str) -> str:
+    return (
+        f"Ship it: commit all changes on `{branch}`, push the branch, and open a pull request to main with "
+        f"`gh pr create` titled {title!r} (what changed, how it was tested). If a PR for this branch is already "
+        "open, just push. Set `pr_url` to the pull request's URL."
+    )
+
+
 class Bridge:
-    def __init__(self, settings: BuilderSettings, shipper_transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, settings: BuilderSettings):
         self.settings = settings
         self.topics = TopicStore(settings.workspace / "topics.json")
-        self.shipper = httpx.AsyncClient(
-            base_url=settings.shipper_url,
-            timeout=300,
-            transport=shipper_transport,
-            headers={"Authorization": f"Bearer {settings.shipper_token}"},
-        )
         self._locks: dict[str, asyncio.Lock] = {}
 
     def lock(self, slug: str) -> asyncio.Lock:
         return self._locks.setdefault(slug, asyncio.Lock())  # one Claude turn per topic at a time
 
-    async def _shipper(self, path: str, json: dict | None = None) -> dict:
-        response = await self.shipper.post(path, json=json)
-        if response.status_code >= 400:
-            raise HTTPException(response.status_code, response.json().get("detail", "shipper error"))
-        return response.json()
+    async def _git(self, *arguments: str) -> None:
+        process = await asyncio.create_subprocess_exec(
+            "git", *arguments, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise HTTPException(502, f"git {arguments[0]} failed: {stderr.decode()[-200:]}")
 
     async def turn(self, slug: str, text: str, mode: Mode) -> dict:
         topic = self.topics.get(slug)
+        workdir = self.settings.workspace / slug
         if topic is None:
-            await self._shipper(f"/topics/{slug}/prepare")
+            if not workdir.exists():
+                await self._git("clone", "--quiet", self.settings.remote_url, str(workdir))
+                await self._git("-C", str(workdir), "checkout", "--quiet", "-B", f"claude/{slug}")
             topic = self.topics.create(slug)
-        result = await run_turn(self.settings, topic, self.settings.workspace / slug, text, mode)
+        result = await run_turn(self.settings, topic, workdir, text, mode)
         turn_cost = max(result.cost_usd_total - topic["cost_usd_total"], 0.0)  # resumed totals include past turns
         topic |= {"started": True, "session_id": result.session_id, "cost_usd_total": result.cost_usd_total}
         if mode == "build" and not result.is_error:
             topic["status"] = "built"
+        pull_request_prefix = f"https://github.com/{self.settings.github_repo}/pull/"
+        shipped = bool(result.pr_url and result.pr_url.startswith(pull_request_prefix))  # only this repo's PRs
+        if shipped:
+            topic |= {"status": "shipped", "pr_url": result.pr_url}
         self.topics.save(topic)
         return {
             "topic": slug,
@@ -65,20 +75,10 @@ class Bridge:
             "show": result.show,
             "question": result.question,
             "is_error": result.is_error,
+            "pr_url": result.pr_url if shipped else None,  # this turn's PR only, so the link shows once
             "turn_cost_usd": round(turn_cost, 4),
             "model_usage": result.model_usage,
         }
-
-    async def ship(self, slug: str, title: str) -> dict:
-        topic = self.topics.get(slug)
-        if topic is None:
-            raise HTTPException(404, "unknown topic")
-        shipped = await self._shipper(
-            f"/topics/{slug}/ship", {"title": title, "body": f"Built with Claude Code by voice (topic `{slug}`)."}
-        )
-        topic |= {"status": "shipped", "pr_url": shipped.get("pr_url")}
-        self.topics.save(topic)
-        return {"topic": slug, "status": "shipped", **shipped}
 
 
 bridge = Bridge(builder_settings)
@@ -86,8 +86,8 @@ bridge = Bridge(builder_settings)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if not (builder_settings.bridge_token and builder_settings.shipper_token):
-        raise RuntimeError("Set FERN_BRIDGE_TOKEN and FERN_SHIPPER_TOKEN")
+    if not builder_settings.bridge_token:
+        raise RuntimeError("Set FERN_BRIDGE_TOKEN")
     builder_settings.workspace.mkdir(parents=True, exist_ok=True)
     yield
 
@@ -139,7 +139,10 @@ async def build(name: str, body: Build) -> dict:
 async def ship(name: str, body: Ship) -> dict:
     slug = slug_of(name)
     async with bridge.lock(slug):
-        return await bridge.ship(slug, body.title)
+        topic = bridge.topics.get(slug)
+        if topic is None:
+            raise HTTPException(404, "unknown topic: plan it first")
+        return await bridge.turn(slug, ship_request(topic["branch"], body.title), "build")
 
 
 @app.get("/topics", dependencies=[Depends(caller)])

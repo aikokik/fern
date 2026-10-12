@@ -1,9 +1,11 @@
-# Image for the builder (Claude Code CLI + bridge) and the shipper (git + GitHub). Same image, different commands
-# and different secrets per container (see compose.yaml).
+# Image for the builder: Claude Code CLI + bridge, with Claude's own GitHub access (gh + git, GH_TOKEN).
 FROM python:3.14-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git rsync curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git gh curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system credential.https://github.com.helper '!gh auth git-credential' \
+    && git config --system user.name "Claude Code (fern)" \
+    && git config --system user.email "claude-code@fern.local"
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /bin/uv
 RUN useradd --create-home --uid 10001 builder \
     && mkdir -p /workspace /repos /state/home /state/claude \

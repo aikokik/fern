@@ -149,7 +149,13 @@ def fake_bridge(bridge_requests: list) -> httpx.MockTransport:
             case "turn":
                 return httpx.Response(200, json=PLAN_REPLY)
             case "ship":
-                return httpx.Response(200, json={"status": "shipped", "commit": "abc123", "pr_url": PR_URL})
+                shipped = {
+                    "status": "shipped",
+                    "say": "Pushed and opened the pull request.",
+                    "show": "",
+                    "question": None,
+                }
+                return httpx.Response(200, json=shipped | {"pr_url": PR_URL})
             case "topics":
                 return httpx.Response(200, json=[{"slug": "weather-tool", "status": "planning", "pr_url": ""}])
         return httpx.Response(404)
@@ -476,7 +482,7 @@ async def test_ship_puts_the_pull_request_link_on_screen():
     await call_tool(connection, "switch_backend", {"target": "claude", "topic": "weather tool"}, "c1")
 
     output = await call_tool(connection, "claude_action", {"action": "ship", "title": "Add weather tool"}, "c2")
-    assert "shipped" in output
+    assert output == ("Claude's answer: Pushed and opened the pull request.\nThe pull request link is on screen.")
     assert ("POST", "/topics/weather tool/ship", {"title": "Add weather tool"}) in bridge_requests
     assert {"type": "claude_link", "label": "Pull request", "url": PR_URL} in browser_events(session)
     await session.close()
