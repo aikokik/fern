@@ -34,17 +34,26 @@ One Claude request runs at a time per session; asking again during a build gets 
 ## Setup (once)
 1. **Claude token** (on your Mac, needs the Claude Code CLI): `claude setup-token`, then copy the printed token.
 2. **GitHub token**: github.com → Settings → Developer settings → Fine-grained tokens → only `aikokik/fern` →
-   **Contents: Read and write**, **Pull requests: Read and write**.
+   **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, **Checks: Read**.
 3. Add to `.env` (generate the two shared secrets with `openssl rand -hex 24`):
    ```
    CLAUDE_CODE_OAUTH_TOKEN=…
    FERN_BUILDER_GITHUB_TOKEN=github_pat_…
    FERN_BRIDGE_TOKEN=…
    FERN_SHIPPER_TOKEN=…
+   FERN_GITHUB_TOOLS_TOKEN=…          # a third random secret: Claude's GitHub command
    FERN_CLAUDE_MODEL=sonnet
    FERN_CLAUDE_DEVICES=phone          # optional: device names allowed to switch to Claude (empty = all)
    ```
 4. `cp .env deploy/.env && cd deploy && FERN_BIND=0.0.0.0 docker compose up -d --build`
+
+## GitHub
+- **Claude** runs `fern-github` (list / read PRs, issues and CI, create issues, close / reopen). The command calls the
+  shipper with `FERN_GITHUB_TOOLS_TOKEN`, which only unlocks those calls. The GitHub token stays in the shipper,
+  and merging or pushing isn't possible. Issues Claude creates are marked "Created by Claude Code via fern".
+- **fern** has `github_list` / `github_read` and, with your spoken yes, `github_create_issue`, `github_open_pr` and
+  `github_set_state`, using `FERN_GITHUB_REPO` + `FERN_GITHUB_TOKEN` (fine-grained, `aikokik/fern` only:
+  **Pull requests** and **Issues** Read and write, **Checks** and **Contents** Read). Never merge.
 
 ## Bridge API (used by fern's web app)
 `Authorization: Bearer $FERN_BRIDGE_TOKEN`, reachable only inside the sealed network at `http://builder:8770`.

@@ -20,6 +20,7 @@ fern = "fern.cli:main"
 fern-web = "fern_web.app:main"
 fern-bridge = "fern_builder.bridge:main"
 fern-shipper = "fern_builder.shipper:main"
+fern-github = "fern_builder.github_cli:main"
 
 [tool.uv.build-backend]
 module-name = ["fern", "fern_web", "fern_builder"]

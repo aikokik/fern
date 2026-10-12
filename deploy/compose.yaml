@@ -54,6 +54,7 @@ services:
       FERN_BRIDGE_TOKEN: ${FERN_BRIDGE_TOKEN:-}
       FERN_SHIPPER_TOKEN: ${FERN_SHIPPER_TOKEN:-}
       FERN_SHIPPER_URL: http://shipper:8771
+      FERN_GITHUB_TOOLS_TOKEN: ${FERN_GITHUB_TOOLS_TOKEN:-}  # Claude's fern-github: shipper /github calls only
       HTTPS_PROXY: http://egress:8888
       HTTP_PROXY: http://egress:8888
       NO_PROXY: shipper
@@ -75,6 +76,7 @@ services:
       FERN_BUILDER_GITHUB_TOKEN: ${FERN_BUILDER_GITHUB_TOKEN:-}
       FERN_GITHUB_REPO: ${FERN_GITHUB_REPO:-aikokik/fern}
       FERN_SHIPPER_TOKEN: ${FERN_SHIPPER_TOKEN:-}
+      FERN_GITHUB_TOOLS_TOKEN: ${FERN_GITHUB_TOOLS_TOKEN:-}
       HTTPS_PROXY: http://egress:8888
       HTTP_PROXY: http://egress:8888
     volumes: ["builder-workspace:/workspace", "shipper-repos:/repos"]

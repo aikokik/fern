@@ -11,6 +11,8 @@ import httpx
 import pytest
 
 from fern_builder import bridge as bridge_module
+from fern_builder import github_cli
+from fern_builder import shipper as shipper_module
 from fern_builder.bridge import Bridge
 from fern_builder.claude_cli import build_command, parse_output
 from fern_builder.config import BuilderSettings, topic_slug
@@ -65,7 +67,8 @@ def test_plan_is_read_only_and_build_can_only_edit_and_test():
     settings = BuilderSettings(claude_bin="claude")
     topic = {"session_id": "s-1", "started": False}
     plan = build_command(settings, topic, "hi", "plan")
-    assert plan[plan.index("--tools") + 1] == "Read,Grep,Glob,WebSearch"
+    assert plan[plan.index("--tools") + 1] == "Read,Grep,Glob,WebSearch,Bash"
+    assert plan[plan.index("--allowedTools") + 1 :][:2] == ["WebSearch", "Bash(fern-github *)"]  # no other shell
     assert plan[plan.index("--permission-mode") + 1] == "dontAsk"
     assert "--session-id" in plan
     assert "--resume" not in plan
@@ -73,7 +76,7 @@ def test_plan_is_read_only_and_build_can_only_edit_and_test():
     build = build_command(settings, topic | {"started": True}, "go", "build")
     assert build[build.index("--permission-mode") + 1] == "acceptEdits"
     allowed = build[build.index("--allowedTools") + 1 :]
-    assert all(rule.startswith("Bash(uv ") for rule in allowed)  # no git, no network, no arbitrary shell
+    assert all(rule.startswith(("Bash(uv ", "Bash(fern-github ")) for rule in allowed)  # no git or arbitrary shell
     assert "--resume" in build
 
 
@@ -191,3 +194,119 @@ async def test_shipper_refuses_unprepared_topics(tmp_path):
     shipper = Shipper(replace(BuilderSettings(), workspace=tmp_path / "w", repos=tmp_path / "r"))
     with pytest.raises(GitError, match="never prepared"):
         await shipper.ship("nope", "Title", "")
+
+
+GITHUB_TOOLS = {"Authorization": "Bearer tools-secret"}
+
+
+def fake_github_api(sent_requests: list, status: int = 200):
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent_requests.append((request.method, request.url.path, json.loads(request.content or b"null")))
+        if status != 200:
+            return httpx.Response(status, json={"message": "echo of the request"})
+        match request.method, request.url.path.removeprefix("/repos/me/fern"):
+            case "GET", "/issues":
+                return httpx.Response(200, json=[
+                    {"number": 3, "title": "Bug", "state": "open", "user": {"login": "aikokik"}},
+                    {"number": 4, "title": "A PR", "state": "open", "user": {"login": "x"}, "pull_request": {}},
+                ])  # fmt: skip
+            case "GET", "/issues/4":
+                return httpx.Response(200, json={
+                    "number": 4, "title": "A PR", "state": "open", "user": {"login": "x"}, "body": "hi", "comments": 0,
+                    "pull_request": {},
+                })  # fmt: skip
+            case "GET", "/pulls/4":
+                return httpx.Response(200, json={"head": {"ref": "claude/a", "sha": "s1"}, "base": {"ref": "main"}})
+            case "GET", "/commits/s1/check-runs":
+                return httpx.Response(
+                    200, json={"check_runs": [{"name": "test", "status": "in_progress", "conclusion": None}]}
+                )
+            case "POST", "/issues":
+                return httpx.Response(201, json={"number": 5, "html_url": "https://github.com/me/fern/issues/5"})
+            case "PATCH", "/issues/4":
+                return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    return handle
+
+
+@pytest.fixture
+def shipper_app(monkeypatch):
+    sent_requests: list = []
+    settings = BuilderSettings(
+        github_repo="me/fern", github_token="gh", shipper_token="ship", github_tools_token="tools-secret"
+    )
+    monkeypatch.setattr(
+        shipper_module, "shipper", Shipper(settings, httpx.MockTransport(fake_github_api(sent_requests)))
+    )
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=shipper_module.app), base_url="http://shipper")
+    return client, sent_requests
+
+
+async def test_github_tools_token_reaches_only_the_github_calls(shipper_app):
+    client, sent_requests = shipper_app
+    assert (await client.get("/github/list?kind=issues", headers={"Authorization": "Bearer ship"})).status_code == 401
+    shipping = await client.post("/topics/weather/ship", json={"title": "Sneaky"}, headers=GITHUB_TOOLS)
+    assert shipping.status_code == 401  # Claude's token can't ship (or prepare)
+
+    issues = (await client.get("/github/list?kind=issues", headers=GITHUB_TOOLS)).json()
+    assert [issue["number"] for issue in issues] == [3]  # PRs filtered out of the issues list
+    pull = (await client.get("/github/item/4", headers=GITHUB_TOOLS)).json()
+    assert pull["pull_request"] == {
+        "head": "claude/a",
+        "base": "main",
+        "merged": False,
+        "checks": {"test": "in_progress"},
+    }
+
+    created = await client.post(
+        "/github/issues", json={"title": "Flaky test", "body": "Seen twice."}, headers=GITHUB_TOOLS
+    )
+    assert created.json() == {"number": 5, "url": "https://github.com/me/fern/issues/5"}
+    assert sent_requests[-1][2]["body"].endswith("_Created by Claude Code via fern._")
+    closed = await client.post("/github/item/4/state", json={"state": "closed"}, headers=GITHUB_TOOLS)
+    assert closed.json() == {"number": 4, "state": "closed"}
+    assert sent_requests[-1] == ("PATCH", "/repos/me/fern/issues/4", {"state": "closed"})
+    assert not any(method == "PUT" or path.endswith("/merge") for method, path, _ in sent_requests)
+
+
+async def test_github_failures_return_status_only(monkeypatch):
+    settings = BuilderSettings(
+        github_repo="me/fern", github_token="gh", shipper_token="ship", github_tools_token="tools-secret"
+    )
+    monkeypatch.setattr(
+        shipper_module, "shipper", Shipper(settings, httpx.MockTransport(fake_github_api([], status=403)))
+    )
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=shipper_module.app), base_url="http://shipper")
+    response = await client.get("/github/list?kind=prs", headers=GITHUB_TOOLS)
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub returned 403"
+
+
+def test_fern_github_command_maps_to_shipper_calls(monkeypatch, capsys):
+    sent_requests = []
+
+    def shipper(request: httpx.Request) -> httpx.Response:
+        sent_requests.append(
+            (request.method, str(request.url), json.loads(request.content or b"null"), request.headers["authorization"])
+        )
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(
+        github_cli, "builder_settings", BuilderSettings(shipper_url="http://shipper", github_tools_token="tools-secret")
+    )
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        github_cli.httpx, "Client", lambda **options: real_client(transport=httpx.MockTransport(shipper), **options)
+    )
+
+    assert github_cli.main(["list", "prs", "--state", "all"]) == 0
+    assert github_cli.main(["create-issue", "--title", "Flaky test", "--body", "Seen twice."]) == 0
+    assert github_cli.main(["reopen", "4"]) == 0
+    assert [request[:3] for request in sent_requests] == [
+        ("GET", "http://shipper/github/list?kind=prs&state=all", None),
+        ("POST", "http://shipper/github/issues", {"title": "Flaky test", "body": "Seen twice."}),
+        ("POST", "http://shipper/github/item/4/state", {"state": "open"}),
+    ]
+    assert all(request[3] == "Bearer tools-secret" for request in sent_requests)
+    assert '"ok": true' in capsys.readouterr().out

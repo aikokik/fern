@@ -22,6 +22,8 @@ class BuilderSettings:
     bridge_token: str = os.getenv("FERN_BRIDGE_TOKEN", "")  # fern_web -> bridge
     shipper_url: str = os.getenv("FERN_SHIPPER_URL", "http://shipper:8771")
     shipper_token: str = os.getenv("FERN_SHIPPER_TOKEN", "")  # bridge -> shipper
+    # Claude (fern-github) -> shipper's /github calls only. Claude can read it, so it must never unlock more.
+    github_tools_token: str = os.getenv("FERN_GITHUB_TOOLS_TOKEN", "")
     plan_turn_seconds: float = float(os.getenv("FERN_PLAN_TURN_SECONDS", "600"))
     build_turn_seconds: float = float(os.getenv("FERN_BUILD_TURN_SECONDS", "1800"))
 
