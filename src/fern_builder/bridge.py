@@ -1,7 +1,7 @@
 """Bridge: fern's voice talks to Claude Code on this Mac, the way the VS Code chat does.
 
 Claude works in the project folder with the user's own login, `gh`, permission rules, memories and CLAUDE.md, and
-continues their latest conversation (as a fork, so an open VS Code chat isn't touched). Whatever their settings
+continues their latest conversation itself (the same session file VS Code uses). Whatever their settings
 would ask about is asked through fern instead: approval card on screen and "approve?" by voice. Built on the
 Claude Agent SDK, the same engine IDE integrations use.
 
@@ -10,6 +10,8 @@ POST /permissions/{id}          {decision: allow | always | deny}
 POST /questions/{id}            {answers: {question: label}}
 POST /interrupt                 stop the current turn
 POST /new                       the next message starts a fresh conversation
+GET  /sessions                  recent conversations in this project, newest first
+POST /sessions/{id}/open        the next message continues that conversation
 GET  /healthz
 """
 
@@ -33,6 +35,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolPermissionContext,
     ToolUseBlock,
+    list_sessions,
 )
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -73,14 +76,15 @@ class ClaudeChat:
         self.client: Any = None
         self.worker: asyncio.Task | None = None
         self.fresh = False  # set by /new: don't continue the latest conversation
+        self.chosen_session: str | None = None  # set by /sessions/{id}/open: continue that one instead
+        self.session_id: str | None = None  # the conversation Claude is in
 
     def options(self) -> ClaudeAgentOptions:
-        continue_latest = not self.fresh
         return ClaudeAgentOptions(
             cwd=self.settings.project_dir,
             setting_sources=["user", "project", "local"],  # the user's own rules, like VS Code
-            continue_conversation=continue_latest,
-            fork_session=continue_latest,
+            resume=self.chosen_session,
+            continue_conversation=not (self.fresh or self.chosen_session),  # the latest one itself, not a copy
             can_use_tool=self._ask_user,
             system_prompt={"type": "preset", "preset": "claude_code", "append": VOICE_NOTE},
         )
@@ -123,7 +127,7 @@ class ClaudeChat:
     async def _run(self) -> None:
         try:
             async with self.client_factory(self.options()) as client:
-                self.client, self.fresh = client, False
+                self.client, self.fresh, self.chosen_session = client, False, None
                 while (text := await self._next_message()) is not None:
                     await client.query(text)
                     async for message in client.receive_response():
@@ -152,6 +156,7 @@ class ClaudeChat:
                 elif isinstance(block, ToolUseBlock) and block.name != "AskUserQuestion":
                     await self._emit({"type": "progress", "text": self.describe(block.name, block.input)})
         elif isinstance(message, ResultMessage):
+            self.session_id = message.session_id
             done = {"reply": message.result or "", "is_error": message.is_error, "cost_usd": message.total_cost_usd}
             await self._emit({"type": "done", **done})
 
@@ -217,9 +222,29 @@ class ClaudeChat:
             await self.client.interrupt()
 
     async def new_conversation(self) -> None:
-        self.fresh = True
+        self.fresh, self.chosen_session = True, None
+        await self._close_after_turn()
+
+    def sessions(self, limit: int = 10) -> list[dict]:
+        return [
+            {
+                "id": info.session_id,
+                "title": info.custom_title or info.summary or info.first_prompt or "Untitled",
+                "updated": info.last_modified // 1000,
+                "current": info.session_id == self.session_id,
+            }
+            for info in list_sessions(directory=str(self.settings.project_dir), limit=limit)
+        ]
+
+    async def open_session(self, session_id: str) -> None:
+        if session_id not in {session["id"] for session in self.sessions(limit=100)}:
+            raise KeyError(session_id)
+        self.fresh, self.chosen_session = False, session_id
+        await self._close_after_turn()
+
+    async def _close_after_turn(self) -> None:
         if self.worker is not None and not self.worker.done():
-            await self.inbox.put(None)  # closes after the current turn; the next message starts fresh
+            await self.inbox.put(None)  # the next message opens the new choice
 
 
 chat = ClaudeChat(builder_settings)
@@ -296,6 +321,20 @@ async def interrupt() -> dict:
 @app.post("/new", dependencies=[Depends(caller)])
 async def new_conversation() -> dict:
     await chat.new_conversation()
+    return {"ok": True}
+
+
+@app.get("/sessions", dependencies=[Depends(caller)])
+async def sessions() -> list[dict]:
+    return chat.sessions()
+
+
+@app.post("/sessions/{session_id}/open", dependencies=[Depends(caller)])
+async def open_session(session_id: str) -> dict:
+    try:
+        await chat.open_session(session_id)
+    except KeyError:
+        raise HTTPException(404, "No such conversation in this project") from None
     return {"ok": True}
 
 

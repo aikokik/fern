@@ -128,6 +128,10 @@ BRIDGE_TOKEN = "b" * 32
 PR_URL = "https://github.com/aikokik/fern/pull/9"
 DONE = {"type": "done", "reply": f"Tests pass and the PR is open.\n\nPR: {PR_URL}", "is_error": False, "cost_usd": 0.1}
 STEPS = [{"type": "progress", "text": "Bash: uv run pytest"}, {"type": "text", "markdown": "All tests pass."}]
+SESSIONS = [
+    {"id": "s-latest", "title": "Household AI learning plan", "updated": 1_791_800_000, "current": True},
+    {"id": "s-older", "title": "Weather tool", "updated": 1_791_700_000, "current": False},
+]
 PERMISSION_ID = "a1" * 16
 PERMISSION = {"type": "permission", "id": PERMISSION_ID, "tool": "Bash", "detail": "Bash: git push"}
 QUESTION = {
@@ -156,6 +160,8 @@ class FakeBridge:
             return httpx.Response(self.status)
         if request.url.path == "/messages":
             return httpx.Response(200, content=self.stream(), headers={"content-type": "application/x-ndjson"})
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json=SESSIONS)
         self.answered.set()
         return httpx.Response(200, json={"ok": True})
 
@@ -544,6 +550,29 @@ async def test_stop_new_chat_and_hanging_up_mid_prompt():
     await session.close()  # nobody can answer anymore: stop that turn
     await run_task
     assert bridge.requests[-1][1] == "/interrupt"
+
+
+async def test_sessions_can_be_listed_and_opened_by_voice():
+    bridge = FakeBridge()
+    connection, session, run_task = await start_claude_session(bridge)
+    await call_tool(connection, "switch_backend", {"target": "claude"}, "c1")
+    browser_events(session)
+
+    output = await call_tool(connection, "claude_action", {"action": "open_session", "number": 2}, "c2")
+    assert output.startswith("Which session?")  # nothing listed yet
+
+    output = await call_tool(connection, "claude_action", {"action": "list_sessions"}, "c3")
+    assert "2 sessions are on screen" in output
+    assert "2: Weather tool." in output
+    panel = next(event for event in browser_events(session) if event["type"] == "claude_text")
+    assert panel["markdown"].startswith("**Claude sessions**\n1. Household AI learning plan")
+    assert "(current)" in panel["markdown"]
+
+    output = await call_tool(connection, "claude_action", {"action": "open_session", "number": 2}, "c4")
+    assert output == "Opened 'Weather tool'. The next message continues it."
+    assert ("POST", "/sessions/s-older/open", {}) in bridge.requests
+    await session.close()
+    await run_task
 
 
 async def test_claude_unavailable_device_not_allowed_or_bridge_failing():

@@ -55,3 +55,13 @@ class ClaudeClient:
 
     async def new_chat(self) -> None:
         await self._post("/new")
+
+    async def sessions(self) -> list[dict]:
+        self._require_setup()
+        response = await self.http.get("/sessions")
+        if response.status_code >= 400:
+            raise ClaudeUnavailableError(f"bridge returned {response.status_code}")
+        return response.json()
+
+    async def open_session(self, session_id: str) -> None:
+        await self._post(f"/sessions/{quote(session_id, safe='')}/open")

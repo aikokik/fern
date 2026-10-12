@@ -16,7 +16,7 @@ from claude_agent_sdk import (
     ToolPermissionContext,
     ToolUseBlock,
 )
-from claude_agent_sdk.types import PermissionRuleValue
+from claude_agent_sdk.types import PermissionRuleValue, SDKSessionInfo
 
 from fern_builder import bridge as bridge_module
 from fern_builder.bridge import VOICE_NOTE, ChatBusyError, ClaudeChat
@@ -88,10 +88,32 @@ def test_options_continue_the_latest_conversation_with_the_users_settings():
     options = chat.options()
     assert options.cwd == PROJECT
     assert options.setting_sources == ["user", "project", "local"]  # the user's own rules, like VS Code
-    assert (options.continue_conversation, options.fork_session) == (True, True)  # a fork of the latest chat
+    assert (options.continue_conversation, options.fork_session, options.resume) == (True, False, None)  # itself
     assert options.system_prompt == {"type": "preset", "preset": "claude_code", "append": VOICE_NOTE}
     chat.fresh = True
-    assert (chat.options().continue_conversation, chat.options().fork_session) == (False, False)
+    assert (chat.options().continue_conversation, chat.options().resume) == (False, None)
+    chat.fresh, chat.chosen_session = False, "session-2"
+    assert (chat.options().continue_conversation, chat.options().resume) == (False, "session-2")
+
+
+async def test_sessions_are_listed_and_one_can_be_opened(monkeypatch):
+    infos = [
+        SDKSessionInfo(session_id="s1", summary="Weather tool", last_modified=1_791_800_000_000),
+        SDKSessionInfo(session_id="s2", summary="Fix flaky tests", last_modified=1_791_700_000_000, custom_title="CI"),
+    ]
+    monkeypatch.setattr(bridge_module, "list_sessions", lambda directory, limit: infos[:limit])
+    chat, opened = make_chat([reads_and_answers, reads_and_answers])
+    await events_of(chat, "hi")  # in session "s" (from the fake result)
+    assert chat.sessions() == [
+        {"id": "s1", "title": "Weather tool", "updated": 1_791_800_000, "current": False},
+        {"id": "s2", "title": "CI", "updated": 1_791_700_000, "current": False},
+    ]
+    with pytest.raises(KeyError):
+        await chat.open_session("not-in-this-project")
+    await chat.open_session("s2")
+    await events_of(chat, "where were we?")
+    assert opened[1].options.resume == "s2"  # the next message continues the chosen conversation
+    assert chat.chosen_session is None
 
 
 async def test_a_turn_streams_steps_text_and_the_final_reply():

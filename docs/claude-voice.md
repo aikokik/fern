@@ -17,8 +17,10 @@ phone/laptop ─▶ fern web (Docker) ─▶ egress proxy ─▶ fern-bridge on 
   **Claude Agent SDK**, the same engine IDE integrations use.
 - **Your setup applies:** `setting_sources = user, project, local`, so your allow/deny rules (e.g. no `.env`),
   CLAUDE.md and memories apply as in VS Code.
-- **Your latest conversation continues as a fork,** so an open VS Code chat isn't touched. "New chat" starts fresh.
-  After 20 idle minutes the session closes, and the next message continues your latest conversation again.
+- **Your latest conversation continues, the same session** VS Code uses, not a copy. "New session" starts fresh;
+  "list my sessions" and "open session 2" switch between this project's sessions. After 20 idle minutes the
+  connection closes, and the next message continues your latest session again.
+- Don't type in the same session in VS Code while Claude is working on it by voice: both would write to it at once.
 - **Live progress:** Claude's steps ("Bash: uv run pytest", "Edit: src/…") and text stream to the panel while it
   works.
 - **Prompts come to you:** when your settings would make Claude ask permission, fern shows **Approve / Always /
@@ -35,7 +37,9 @@ phone/laptop ─▶ fern web (Docker) ─▶ egress proxy ─▶ fern-bridge on 
 | "yes" / "no" / "always" (after "Approve?") | Answers Claude's permission prompt |
 | "option 2" / "the first one" (or tap) | Answers Claude's question |
 | "stop" | Interrupts what Claude is doing |
-| "new chat" | The next message starts a fresh conversation |
+| "new session" / "new chat" | The next message starts a fresh session |
+| "list my sessions" | This project's recent sessions, numbered, on screen (the first few read out) |
+| "open session 2" | The next message continues that session |
 | "back to fern" | fern's own tools again; the panel stays readable |
 
 While talking to Claude, fern's tools (alarms, memory) are off; say "back to fern" first. If you hang up while Claude
@@ -62,8 +66,8 @@ permission rules. What protects you:
 - **Who can open Claude:** `FERN_CLAUDE_DEVICES`, which limits it to your devices.
 - **The bridge itself:** it listens only on `127.0.0.1` and needs `FERN_BRIDGE_TOKEN`. Docker reaches it through
   the egress proxy (`host.docker.internal` is on the allowlist). The brain's own in-app allowlist still blocks it.
-- **Context cost:** continuing a long VS Code chat means each voice turn re-reads that context. It's cached, but it
-  uses plan limits faster. Claude Code compacts it automatically.
+- **Context cost:** continuing a long session means each voice turn re-reads that context. It's cached, but it uses
+  plan limits faster. Claude Code compacts it automatically.
 
 ## Bridge API (fern_web → fern-bridge)
 `Authorization: Bearer $FERN_BRIDGE_TOKEN`.
@@ -75,3 +79,5 @@ permission rules. What protects you:
 | `POST /questions/{id} {answers}` | `{question: label}` |
 | `POST /interrupt` | Stop the current turn |
 | `POST /new` | The next message starts a fresh conversation |
+| `GET /sessions` | This project's recent sessions (`id`, `title`, `updated`, `current`) |
+| `POST /sessions/{id}/open` | The next message continues that session |

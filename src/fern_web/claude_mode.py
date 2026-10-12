@@ -28,6 +28,7 @@ OPTION_ANSWER = re.compile(
     r"^\s*(?:option|number|the)?\s*(\d|one|two|three|four|first|second|third|fourth)\b(?:\s+(?:one|option))?\s*[.!]?\s*$",
     re.I,
 )
+SESSIONS_LISTED = 8
 PULL_REQUEST_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
 
@@ -49,6 +50,7 @@ class ClaudeMode:
         self.working = False  # a Claude turn is running
         self.permission: dict | None = None  # what Claude is waiting for the user to approve
         self.question: dict | None = None  # Claude's open questions: {id, questions, answers}
+        self.listed_sessions: list[dict] = []  # the last list shown, so "open session 2" means its second entry
 
     async def handle(self, name: str, call_id: str, arguments: dict) -> None:
         if name == "switch_backend":
@@ -61,12 +63,46 @@ class ClaudeMode:
             await self.session.send_tool_output(call_id, "Claude is still working. Say 'stop' to interrupt it.")
         elif name == "ask_claude":
             await self._turn(call_id, arguments.get("request", ""))
-        elif arguments.get("action") == "stop":
-            await self._call_bridge(self.client.interrupt)
-            await self.session.send_tool_output(call_id, "Stopping Claude.")
         else:
-            await self._call_bridge(self.client.new_chat)
-            await self.session.send_tool_output(call_id, "The next message starts a new chat with Claude.")
+            await self.session.send_tool_output(call_id, await self._action(arguments))
+
+    async def _action(self, arguments: dict) -> str:
+        match arguments.get("action"):
+            case "stop":
+                await self._call_bridge(self.client.interrupt)
+                return "Stopping Claude."
+            case "new_chat":
+                await self._call_bridge(self.client.new_chat)
+                return "The next message starts a new session with Claude."
+            case "list_sessions":
+                return await self._list_sessions()
+            case _:
+                return await self._open_session(arguments.get("number") or 0)
+
+    async def _list_sessions(self) -> str:
+        try:
+            self.listed_sessions = (await self.client.sessions())[:SESSIONS_LISTED]
+        except Exception as error:
+            return f"Couldn't list Claude's sessions ({_describe(error)}). Tell the user."
+        lines = [
+            f"{number}. {session['title']} ({time.strftime('%b %d %H:%M', time.localtime(session['updated']))})"
+            + (" (current)" if session["current"] else "")
+            for number, session in enumerate(self.listed_sessions, 1)
+        ]
+        await self.session.browser_events.put(
+            {"type": "claude_text", "markdown": "**Claude sessions**\n" + "\n".join(lines)}
+        )
+        spoken_titles = " ".join(
+            f"{number}: {session['title']}." for number, session in enumerate(self.listed_sessions[:3], 1)
+        )
+        return f"{len(lines)} sessions are on screen, newest first. Read the first few briefly: {spoken_titles}"
+
+    async def _open_session(self, number: int) -> str:
+        if not 1 <= number <= len(self.listed_sessions):
+            return "Which session? List them first (claude_action list_sessions), then open one by its number."
+        chosen = self.listed_sessions[number - 1]
+        await self._call_bridge(lambda: self.client.open_session(chosen["id"]))
+        return f"Opened '{chosen['title']}'. The next message continues it."
 
     async def _switch(self, call_id: str, target: str) -> None:
         if target == "fern":

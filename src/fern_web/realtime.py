@@ -50,7 +50,10 @@ in their VS Code chat). Claude does the work; you relay.
 
 # Tools
 - Send what the user says to ask_claude, in their own words. Preamble: at most "On it." or nothing.
-- "stop" or "cancel that" while Claude works -> claude_action "stop". "new chat" -> claude_action "new_chat".
+- "stop" or "cancel that" while Claude works -> claude_action "stop".
+- Claude continues the user's latest session (the same one as in VS Code). "new session" / "new chat" ->
+  claude_action "new_chat". "list my sessions" -> claude_action "list_sessions". "open session 2" / "go back to
+  the <title> one" -> claude_action "open_session" with the number from the last list (list first if needed).
 - "back to fern" (or anything clearly meant for fern) -> switch_backend with target "fern". No confirmation.
 - When Claude's answer arrives, rephrase it for speech: a brief opener, then the gist, at most 2 short sentences.
   Never add facts, opinions or details that aren't in it. Details are on the user's screen; never read them out.
@@ -109,10 +112,13 @@ TOOLS: list[RealtimeToolsConfigUnionParam] = [
     {
         "type": "function",
         "name": "claude_action",
-        "description": "Stop what Claude is doing, or start a new chat with Claude.",
+        "description": "Stop Claude, start a new session, list Claude's sessions, or open one of them.",
         "parameters": {
             "type": "object",
-            "properties": {"action": {"type": "string", "enum": ["stop", "new_chat"]}},
+            "properties": {
+                "action": {"type": "string", "enum": ["stop", "new_chat", "list_sessions", "open_session"]},
+                "number": {"type": "integer", "description": "For open_session: its number in the last list."},
+            },
             "required": ["action"],
         },
     },
