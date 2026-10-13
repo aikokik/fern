@@ -354,6 +354,7 @@ def test_costs_price_audio_text_tools_and_flag_unknown_models():
     voice = zero | {"input": 1_000_000, "audio_input": 1_000_000, "output": 1_000_000, "audio_output": 1_000_000}
     assert costs.cost("gpt-realtime-2.1-mini", voice) == 10.00 + 20.00  # audio priced, not text
     assert costs.cost("web_search_call", zero | {"requests": 3}) == 0.03
+    assert costs.cost("gpt-6-luna", brain_call) == pytest.approx(0.5 * 0.10 + 0.5 * 0.01 + 0.1 * 0.50)
     assert costs.cost("some-new-model", brain_call) is None
 
     rows = [

@@ -101,9 +101,8 @@ class Brain:
         self._exit_stack = AsyncExitStack()
         set_tracing_disabled(not settings.tracing)  # privacy: household transcripts don't leave the box by default
         self.run_config = RunConfig(call_model_input_filter=self._prepare_model_input, workflow_name="fern")
-        self.lean_settings = ModelSettings(
-            prompt_cache_retention="24h", verbosity="low", reasoning=Reasoning(effort=settings.reasoning_effort)
-        )
+        # No prompt_cache_retention: GPT-6 models replaced it (30m cache by default); older models default to 24h.
+        self.lean_settings = ModelSettings(verbosity="low", reasoning=Reasoning(effort=settings.reasoning_effort))
         # Isolation: outside content (web pages, documents) only ever enters this subagent, which has OpenAI's
         # hosted tools and none of fern's actions. Its answer reaches the main agent marked untrusted.
         hosted_tools: list = [WebSearchTool(search_context_size="low")]

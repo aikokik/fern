@@ -1,7 +1,7 @@
 """Inspect eval of the real brain. The agent bridge routes the brain's model calls through Inspect,
 so the model is chosen on the CLI and every call is logged:
 
-    uv run inspect eval evals/household.py --model openai/gpt-5-mini
+    uv run inspect eval evals/household.py --model openai/gpt-6-luna
     uv run inspect view
 """
 

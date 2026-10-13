@@ -30,7 +30,9 @@ class Settings:
     skills_dir: Path = Path(os.getenv("FERN_SKILLS", "./skills"))
     # Virtual models: alias -> provider model string. "litellm/..." or "any-llm/..." route to other providers.
     models: dict[str, str] = field(
-        default_factory=lambda: {"main": "gpt-5", "fast": "gpt-5-mini"} | json.loads(os.getenv("FERN_MODELS", "{}"))
+        default_factory=lambda: (
+            {"main": "gpt-6-luna", "fast": "gpt-6-luna"} | json.loads(os.getenv("FERN_MODELS", "{}"))
+        )
     )
     # Codex-style approval policy: "untrusted" asks for ACT+RISKY, "on-risk" asks for RISKY, "never" disables RISKY.
     approval: str = os.getenv("FERN_APPROVAL", "on-risk")
