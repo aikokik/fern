@@ -1,0 +1,41 @@
+# @claude in an issue or PR comment: a question gets an answer in the thread; a task goes on the to-do list
+# (an issue labeled `todo`); work starts only when the comment explicitly asks for it (then a claude/ branch + PR).
+# Runs on GitHub's runners with the owner's Claude subscription token and this job's own GitHub token (no Claude
+# GitHub App). Only users with write access can trigger it.
+name: claude
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}  # for `gh issue create` (the to-do list); expires with the job
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # No Claude GitHub App: act with this job's token. Side effect: GitHub doesn't start other workflows (CI)
+          # for pushes made with it, so re-run CI by hand on Claude's PRs.
+          github_token: ${{ github.token }}
+          claude_args: |
+            --allowedTools "Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh issue view:*)"
+            --append-system-prompt "You are answering a GitHub comment from the repository owner. Decide what the comment is:
+            - A question: answer it in your reply, concisely. Don't change any files.
+            - A task: don't do it now. Add it to the to-do list: run gh issue create --label todo with a short title and a body that states the task, links the comment, and adds useful context. Reply with the issue link. Don't change any files.
+            - An explicit request to do the work now (for example 'implement this', 'do it now'): do it on a claude/ branch and open a pull request. Never push to main and never merge.
+            Follow CLAUDE.md."
