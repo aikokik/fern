@@ -1,9 +1,11 @@
-// fern voice client: microphone + speaker over WebRTC, captions, approval cards. No tool logic lives here.
+// fern voice client: microphone + speaker over WebRTC, captions, approval cards, Claude panel. No tool logic here.
 const element = (selector) => document.querySelector(selector);
 let deviceToken = localStorage.getItem("fern-token") || "";
 let peerConnection = null;
 let microphone = null;
 let sessionId = null;
+let talkingTo = "fern";
+const MAX_CLAUDE_STEPS = 20;  // who answers in the voice: fern, or Claude (relayed by the same voice)
 
 const api = (path, body) => fetch(path, {
   method: body === undefined ? "GET" : "POST",
@@ -21,7 +23,9 @@ function addCaption(speaker, text) {
   if (!text) return;
   const caption = document.createElement("p");
   caption.className = speaker;
-  caption.textContent = text;
+  const label = document.createElement("small");
+  label.textContent = speaker === "you" ? `you → ${talkingTo}` : talkingTo;
+  caption.append(label, text);
   element("#log").prepend(caption);
 }
 
@@ -60,6 +64,7 @@ function stop(statusText = "Tap to talk") {
   peerConnection?.close();
   peerConnection = null;
   microphone = null;
+  showMode({ mode: "fern" });
   setState("idle", statusText);
 }
 
@@ -96,6 +101,146 @@ function onFernEvent(event) {
   else if (event.type === "resolved") resolveApprovalCards(event.approved);
   else if (event.type === "error") addCard("Something went wrong", `${event.message} · check fern logs for ref ${event.reference}`);
   else if (event.type === "command" && event.command.type === "alarm.set") showAlarmCard(event.command);
+  else if (event.type === "mode") showMode(event);
+  else if (event.type === "working") showWorking(event.by);
+  else if (event.type === "claude_turn") startClaudeTurn(event.text);
+  else if (event.type === "claude_progress") addClaudeStep(event.text);
+  else if (event.type === "claude_text") addClaudeText(event.markdown);
+  else if (event.type === "claude_permission") showClaudePermission(event);
+  else if (event.type === "claude_permission_resolved") resolveClaudePermission(event.decision);
+  else if (event.type === "claude_question") showClaudeQuestion(event);
+  else if (event.type === "claude_question_answered") element("#claude-question").replaceChildren();
+  else if (event.type === "claude_link") addClaudeLink(event);
+}
+
+function showWorking(handler) {
+  if (!sessionId) return;
+  const working = { fern: "fern's brain is working…", claude: "Claude is working…" }[handler];
+  setState("live", working || "Listening…");
+}
+
+function showMode(event) {
+  const talkingToClaude = event.mode === "claude";
+  talkingTo = talkingToClaude ? "Claude" : "fern";
+  element("#mode").hidden = !talkingToClaude;
+  element("#mode").textContent = talkingToClaude ? "Claude" : "";
+  if (talkingToClaude) element("#claude-panel").hidden = false;  // the conversation stays readable afterwards
+}
+
+// Like the VS Code chat: each turn shows your words, Claude's steps as they happen, its text, and any prompt.
+function startClaudeTurn(text) {
+  for (const part of ["#claude-steps", "#claude-plan", "#claude-permission", "#claude-question", "#claude-links"]) {
+    element(part).replaceChildren();
+  }
+  const request = document.createElement("p");
+  request.className = "claude-you";
+  request.textContent = text;
+  element("#claude-plan").append(request);
+}
+
+function addClaudeStep(text) {
+  const steps = element("#claude-steps");
+  steps.appendChild(document.createElement("li")).textContent = text;
+  while (steps.children.length > MAX_CLAUDE_STEPS) steps.firstElementChild.remove();
+}
+
+function addClaudeText(markdown) {
+  const block = document.createElement("div");
+  renderMarkdown(block, markdown);
+  element("#claude-plan").append(block);
+}
+
+function promptWithButtons(container, text, choices) {
+  container.replaceChildren();
+  const prompt = document.createElement("p");
+  prompt.textContent = text;
+  const buttons = document.createElement("div");
+  buttons.className = "option-buttons";
+  for (const { label, primary, onChoose } of choices) {
+    const button = document.createElement("button");
+    button.textContent = label;
+    button.className = primary ? "" : "ghost";
+    button.onclick = async () => {
+      buttons.remove();
+      if (!(await onChoose()).ok) prompt.textContent += " (couldn't send, answer by voice)";
+    };
+    buttons.append(button);
+  }
+  container.append(prompt, buttons);
+}
+
+function showClaudePermission(request) {
+  const decide = (decision) => () =>
+    api("/realtime/claude/permission", { session_id: sessionId, permission_id: request.id, decision });
+  promptWithButtons(element("#claude-permission"), `Allow ${request.detail}?`, [
+    { label: "Approve", primary: true, onChoose: decide("allow") },
+    { label: "Always", onChoose: decide("always") },
+    { label: "Reject", onChoose: decide("deny") },
+  ]);
+}
+
+function resolveClaudePermission(decision) {
+  const box = element("#claude-permission");
+  box.querySelector(".option-buttons")?.remove();
+  const prompt = box.querySelector("p");
+  if (prompt) prompt.textContent += { allow: " ✓ approved", always: " ✓ always allowed", deny: " ✗ rejected" }[decision];
+}
+
+function showClaudeQuestion(question) {
+  promptWithButtons(element("#claude-question"), question.text, question.options.map((label, index) => ({
+    label: `${index + 1}. ${label}`,
+    onChoose: () => api("/realtime/claude", { session_id: sessionId, text: `option ${index + 1}` }),
+  })));
+}
+
+function addClaudeLink(event) {
+  if (!event.url.startsWith("https://")) return;
+  const link = document.createElement("a");
+  link.className = "button";
+  link.href = event.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = event.label;
+  element("#claude-links").append(link);
+}
+
+// Small markdown subset (headings, lists, code blocks, **bold**, `code`). Built with textContent only: Claude's
+// text never becomes HTML.
+function renderMarkdown(container, markdown) {
+  container.replaceChildren();
+  let list = null;
+  let codeBlock = null;
+  for (const line of markdown.split("\n")) {
+    if (line.trimStart().startsWith("```")) {
+      codeBlock = codeBlock ? null : container.appendChild(document.createElement("pre"));
+      list = null;
+      continue;
+    }
+    if (codeBlock) { codeBlock.textContent += `${line}\n`; continue; }
+    const heading = line.match(/^#{1,4}\s+(.*)/);
+    const listItem = line.match(/^\s*([-*]|\d+\.)\s+(.*)/);
+    if (listItem) {
+      const listType = listItem[1].endsWith(".") ? "OL" : "UL";
+      if (list?.tagName !== listType) list = container.appendChild(document.createElement(listType));
+      appendInline(list.appendChild(document.createElement("li")), listItem[2]);
+      continue;
+    }
+    list = null;
+    if (heading) appendInline(container.appendChild(document.createElement("h3")), heading[1]);
+    else if (line.trim()) appendInline(container.appendChild(document.createElement("p")), line);
+  }
+}
+
+function appendInline(parent, text) {
+  for (const part of text.split(/(\*\*[^*]+\*\*|`[^`]+`)/)) {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      parent.appendChild(document.createElement("strong")).textContent = part.slice(2, -2);
+    } else if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      parent.appendChild(document.createElement("code")).textContent = part.slice(1, -1);
+    } else if (part) {
+      parent.append(part);
+    }
+  }
 }
 
 function addCard(title, detail) {
@@ -147,16 +292,43 @@ function showAlarmCard(command) {
 
 function showTokenForm() {
   element("#token-form").hidden = false;
+  refreshTokenStatus();
   element("#token").focus();
 }
 
-element("#token-form").onsubmit = (submitEvent) => {
+// The browser keeps the token after the first paste, so say whether one is saved and which device it belongs to.
+async function refreshTokenStatus() {
+  const status = element("#token-status");
+  element("#forget-token").hidden = !deviceToken;
+  if (!deviceToken) {
+    status.textContent = "No token saved in this browser.";
+    return;
+  }
+  status.textContent = "Token saved, checking…";
+  const response = await api("/v1/profile").catch(() => null);
+  if (response?.ok) status.textContent = `Token saved ✓ · device: ${(await response.json()).device}`;
+  else if (response?.status === 401) status.textContent = "The saved token was rejected. Paste a new one.";
+  else status.textContent = "Token saved ✓ (couldn't check: fern is unreachable)";
+}
+
+element("#token-form").onsubmit = async (submitEvent) => {
   submitEvent.preventDefault();
   deviceToken = element("#token").value.trim();
   localStorage.setItem("fern-token", deviceToken);
-  element("#token-form").hidden = true;
+  element("#token").value = "";
+  await refreshTokenStatus();
+  setState("idle", deviceToken ? "Tap to talk" : "Add your device token ⚙");
 };
-element("#settings").onclick = () => { element("#token-form").hidden = !element("#token-form").hidden; };
+element("#forget-token").onclick = () => {
+  localStorage.removeItem("fern-token");
+  deviceToken = "";
+  refreshTokenStatus();
+  setState("idle", "Add your device token ⚙");
+};
+element("#settings").onclick = () => {
+  if (element("#token-form").hidden) showTokenForm();
+  else element("#token-form").hidden = true;
+};
 element("#mic").onclick = () => (peerConnection ? stop() : start());
 element("#mute").onclick = () => {
   const track = microphone?.getTracks()[0];

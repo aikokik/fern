@@ -2,3 +2,4 @@
 ^api\.anthropic\.com$
 ^api\.github\.com$
 ^ntfy\.sh$
+^host\.docker\.internal$

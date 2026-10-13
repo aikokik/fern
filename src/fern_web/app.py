@@ -8,6 +8,7 @@ import json
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -16,8 +17,9 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from fern_web.brain_client import BrainClient, BrainError
+from fern_web.claude_client import ClaudeClient
 from fern_web.config import web_settings
-from fern_web.realtime import start_call
+from fern_web.realtime import household_facts, start_call
 from fern_web.sideband import VoiceSession
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -33,6 +35,7 @@ FORGET_SESSION_AFTER_SECONDS = 60
 class AppState:
     brain: BrainClient  # created in lifespan (needs the event loop / API key)
     openai: AsyncOpenAI
+    claude: ClaudeClient
 
     def __init__(self):
         self.voice_sessions: dict[str, tuple[str, VoiceSession]] = {}  # session id -> (device token hash, session)
@@ -45,6 +48,7 @@ state = AppState()
 async def lifespan(_app: FastAPI):
     state.brain = BrainClient(web_settings.brain_url)
     state.openai = AsyncOpenAI()
+    state.claude = ClaudeClient(web_settings.bridge_url, web_settings.bridge_token)
     yield
 
 
@@ -137,6 +141,10 @@ async def start_voice_call(body: Offer, device_token: str = Depends(bearer_token
         notice_poll_seconds=web_settings.notice_poll_seconds,
         model_name=web_settings.model,
         transcribe_model=web_settings.transcribe_model,
+        claude=state.claude,
+        device_name=profile["device"],
+        claude_devices=web_settings.claude_devices,
+        household_facts=household_facts(profile),
     )
     state.voice_sessions[session_id] = (_hash(device_token), voice_session)
 
@@ -190,6 +198,38 @@ async def approve(body: Decision, device_token: str = Depends(bearer_token)) -> 
     verdict = "approved" if body.approve else "rejected"
     await voice_session.say(f"Notice: the user {verdict} the action. Result: {brain_response.get('reply', '')}")
     return brain_response
+
+
+class ClaudeAnswer(BaseModel):
+    session_id: str
+    text: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/realtime/claude", status_code=202)
+async def answer_claude(body: ClaudeAnswer, device_token: str = Depends(bearer_token)) -> dict:
+    """A tapped option for Claude's question. Claude carries on; its reply comes back through the voice session."""
+    voice_session = owned_session(body.session_id, device_token)
+    if not voice_session.claude.question:
+        raise HTTPException(409, "Claude isn't asking anything")
+    voice_session.answer_claude_from_screen(body.text)
+    return {"accepted": True}
+
+
+class ClaudePermission(BaseModel):
+    session_id: str
+    permission_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    decision: Literal["allow", "always", "deny"]
+
+
+@app.post("/realtime/claude/permission", status_code=202)
+async def decide_claude_permission(body: ClaudePermission, device_token: str = Depends(bearer_token)) -> dict:
+    """A tapped Approve / Always / Reject on Claude's permission card, like VS Code's prompt."""
+    voice_session = owned_session(body.session_id, device_token)
+    waiting = voice_session.claude.permission
+    if waiting is None or waiting["id"] != body.permission_id:
+        raise HTTPException(409, "Claude isn't waiting for that")
+    voice_session.decide_claude_from_screen(body.decision)
+    return {"accepted": True}
 
 
 class EndCall(BaseModel):

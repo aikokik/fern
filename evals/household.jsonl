@@ -5,3 +5,5 @@
 {"id": "builder-plan", "input": "Ask Claude Code to plan how fern could control my TV", "target": "Drafts a clear plan request for Claude Code and asks for approval.", "metadata": {"tools": ["request_change"], "forbid": ["load_tools"], "pending": true}}
 {"id": "remember-preference", "input": "Remember that I like short answers", "target": "Confirms it saved that the user likes short answers.", "metadata": {"tools": ["remember"], "pending": false}}
 {"id": "research-web", "input": "Search the web: who won the 2026 Nobel Prize in Physics?", "target": "Names the laureate(s) briefly, citing a source; plain text.", "metadata": {"tools": ["research"], "forbid": ["remember", "set_alarm"], "pending": false}}
+{"id": "github-list", "input": "What pull requests are open on fern?", "target": "Briefly lists the open pull requests.", "metadata": {"tools": ["github_list"], "pending": false}}
+{"id": "github-close", "input": "Close issue 12 on GitHub", "target": "Asks for approval to close issue #12.", "metadata": {"tools": ["github_set_state"], "pending": true}}

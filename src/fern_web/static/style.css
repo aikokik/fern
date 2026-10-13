@@ -20,6 +20,8 @@ button, .button {
 }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 form { display: grid; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+.token-buttons { display: flex; gap: 8px; }
+#token-status { margin: 0; }
 input { font: inherit; padding: .6rem; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 
 #stage { display: grid; justify-items: center; gap: 14px; padding-block: 8vh 4vh; }
@@ -36,8 +38,24 @@ body[data-state="connecting"] #mic { opacity: .6; }
 #cards h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 4px; }
 #cards p { margin: 0 0 10px; overflow-wrap: anywhere; }
 #cards div { display: flex; gap: 8px; }
+.badge { font-size: .8rem; padding: .2rem .7rem; border-radius: 999px; background: var(--accent); color: var(--bg); }
+#claude-panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 4px 14px 12px; margin-bottom: 10px; }
+#claude-panel h3 { font-size: 1rem; margin: 12px 0 4px; }
+#claude-panel p, #claude-panel li { overflow-wrap: anywhere; }
+#claude-panel pre { overflow-x: auto; background: var(--bg); padding: 10px; border-radius: 10px; font-size: .85rem; }
+#claude-panel code { font-size: .9em; }
+#claude-question { border-top: 1px solid var(--line); margin-top: 10px; }
+#claude-question:empty { display: none; }
+.option-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+#claude-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 #log p { margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; max-width: 85%; }
 #log .you { background: var(--card); margin-left: auto; }
+#log small { display: block; font-size: .7rem; color: var(--muted); }
+#claude-steps { margin: 10px 0 0; padding-left: 1.2rem; color: var(--muted); font: .8rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#claude-steps li { overflow-wrap: anywhere; }
+#claude-steps:empty, #claude-permission:empty { display: none; }
+#claude-permission { border-top: 1px solid var(--line); margin-top: 10px; }
+.claude-you { color: var(--muted); font-style: italic; }
 #log .fern { border: 1px solid var(--line); }
 
 /* usage page */

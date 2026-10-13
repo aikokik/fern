@@ -29,7 +29,12 @@ services:
       FERN_VOICE_DAILY_MINUTES: ${FERN_VOICE_DAILY_MINUTES:-30}
       FERN_VOICE_MAX_OUTPUT_TOKENS: ${FERN_VOICE_MAX_OUTPUT_TOKENS:-600}
       FERN_VOICE_CONTEXT_TOKENS: ${FERN_VOICE_CONTEXT_TOKENS:-4000}
+      # Claude Code runs on the Mac like the VS Code plugin (fern-bridge, see docs/claude-voice.md); reached via egress.
+      FERN_BRIDGE_URL: http://host.docker.internal:8770
+      FERN_BRIDGE_TOKEN: ${FERN_BRIDGE_TOKEN:-}
+      FERN_CLAUDE_DEVICES: ${FERN_CLAUDE_DEVICES:-}  # device names allowed to switch to Claude; empty = all
       HTTPS_PROXY: http://egress:8888
+      HTTP_PROXY: http://egress:8888
       NO_PROXY: brain
     networks: [sealed]
     read_only: true

@@ -8,7 +8,7 @@ from pathlib import Path
 from agents import RunContextWrapper
 
 from fern.core import TOOL_GROUPS, FernContext, Tier, tool
-from fern.tools import builder, device
+from fern.tools import builder, device, github
 
 
 def skills_index(skills_dir: Path) -> dict[str, str]:
@@ -71,7 +71,7 @@ async def recall(run: RunContextWrapper[FernContext], query: str) -> str:
 
 
 GROUPS: dict[str, str] = {}  # filled by plugins
-ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *builder.TOOLS]
+ALL = [read_skill, load_tools, remember, recall, *device.TOOLS, *builder.TOOLS, *github.TOOLS]
 
 
 def active(skills_dir: Path) -> list:

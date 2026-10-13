@@ -13,19 +13,32 @@
   <main>
     <header>
       <h1>fern</h1>
+      <span id="mode" class="badge" hidden></span>
       <div class="header-links"><a href="/usage">Usage</a><button id="settings" class="ghost" aria-label="Device token">⚙</button></div>
     </header>
 
     <form id="token-form" hidden>
+      <p id="token-status" class="muted"></p>
       <label for="token">Device token</label>
       <input id="token" type="password" autocomplete="off" placeholder="paste the phone= value from .env">
-      <button type="submit">Save</button>
+      <div class="token-buttons">
+        <button type="submit">Save</button>
+        <button type="button" id="forget-token" class="ghost" hidden>Forget</button>
+      </div>
     </form>
 
     <section id="stage">
       <button id="mic" aria-label="Start talking"><span></span></button>
       <p id="status">Tap to talk</p>
       <button id="mute" class="ghost" hidden>Mute</button>
+    </section>
+
+    <section id="claude-panel" hidden aria-live="polite">
+      <ol id="claude-steps"></ol>
+      <div id="claude-plan"></div>
+      <div id="claude-permission"></div>
+      <div id="claude-question"></div>
+      <div id="claude-links"></div>
     </section>
 
     <section id="cards" aria-live="polite"></section>
