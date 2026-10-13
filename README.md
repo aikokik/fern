@@ -1,4 +1,4 @@
-# fern: Interactive coding w/ Claude and Codex
+# fern: Interactive coding w/ Claude and Codex via voice 
 
 ```
 phone/laptop ─Tailscale HTTPS─▶ ingress ─▶ web (src/fern_web: voice UI, Realtime handshake + server channel, /v1 pass-through)
