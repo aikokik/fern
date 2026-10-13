@@ -174,7 +174,12 @@ class ClaudeMode:
         assert self.question is not None
         current = self.question["questions"][len(self.question["answers"])]
         await self.session.browser_events.put(
-            {"type": "claude_question", "text": current["question"], "options": current["options"]}
+            {
+                "type": "claude_question",
+                "text": current["question"],
+                "options": current["options"],
+                "descriptions": current.get("descriptions", []),
+            }
         )
         await self.session.say(f"Notice: Claude asks: {current['question']} {spoken_options(current['options'])}")
 

@@ -175,7 +175,12 @@ async def test_questions_come_back_with_the_chosen_labels():
     stream = chat.stream()
     question = await anext(stream)
     assert question["questions"] == [
-        {"question": "Which source?", "options": ["Open-Meteo", "Weather.gov"], "multi_select": False}
+        {
+            "question": "Which source?",
+            "options": ["Open-Meteo", "Weather.gov"],
+            "descriptions": ["free", "US only"],  # shown under each choice, like VS Code's question card
+            "multi_select": False,
+        }
     ]
     chat.answer_questions(question["id"], {"Which source?": "Weather.gov"})
     assert (await anext(stream))["type"] == "done"

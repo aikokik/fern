@@ -24,8 +24,8 @@ from fern_web.sideband import VoiceSession
 
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
-    "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://images.pexels.com; "
+    "media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 )
 MIN_SECONDS_TO_START = 30
 SSE_KEEPALIVE_SECONDS = 15
@@ -198,6 +198,18 @@ async def approve(body: Decision, device_token: str = Depends(bearer_token)) -> 
     verdict = "approved" if body.approve else "rejected"
     await voice_session.say(f"Notice: the user {verdict} the action. Result: {brain_response.get('reply', '')}")
     return brain_response
+
+
+class ScreenWords(BaseModel):
+    session_id: str
+    text: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/realtime/say", status_code=202)
+async def say_from_screen(body: ScreenWords, device_token: str = Depends(bearer_token)) -> dict:
+    """A tapped choice on one of fern's cards, sent as if the user had said it."""
+    owned_session(body.session_id, device_token).said_on_screen(body.text)
+    return {"accepted": True}
 
 
 class ClaudeAnswer(BaseModel):

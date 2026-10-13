@@ -20,7 +20,17 @@ AUTHORIZED = {"Authorization": f"Bearer {DEVICE_TOKEN}"}
 OFFER = {"sdp": "v=0 offer-sdp"}
 
 
-def fake_brain(recorded_calls: list, voice_seconds_today: float = 0, chat_status: int = 200) -> httpx.MockTransport:
+RECIPE_ANSWER = {
+    "reply": "Here's a pad thai recipe for 2.",
+    "tools": ["show_card"],
+    "commands": [{"type": "show.card", "card": {"type": "checklist", "title": "Shopping", "items": ["noodles"]}}],
+    "pending": [],
+}
+
+
+def fake_brain(
+    recorded_calls: list, voice_seconds_today: float = 0, chat_status: int = 200, answer_only: bool = False
+) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         recorded_calls.append((request.method, request.url.path, json.loads(request.content or b"null")))
         if request.headers["authorization"] != f"Bearer {DEVICE_TOKEN}":
@@ -37,6 +47,8 @@ def fake_brain(recorded_calls: list, voice_seconds_today: float = 0, chat_status
                 )
             case "/v1/chat" if chat_status != 200:
                 return httpx.Response(chat_status)
+            case "/v1/chat" if answer_only:
+                return httpx.Response(200, json=RECIPE_ANSWER)
             case "/v1/chat":
                 return httpx.Response(
                     200,
@@ -642,3 +654,32 @@ def test_the_voice_gets_a_short_gist_and_speakable_options():
     assert spoken_options(["Yes", "No"]) == "Option 1: Yes. Option 2: No."
     assert chosen_label("the second one", ["Open-Meteo", "Weather.gov"]) == "Weather.gov"
     assert "rephrase it for speech" in instructions_for("claude")  # paraphrased, not read verbatim
+
+
+async def test_fern_answers_show_on_screen_and_taps_count_as_words():
+    connection, recorded_calls = FakeRealtimeConnection(), []
+    session = voice_session(connection, recorded_calls)
+    session.brain = BrainClient("http://brain", fake_brain(recorded_calls, answer_only=True))
+    run_task = asyncio.create_task(session.run())
+    await connection.incoming.put(response_done("completed", '{"request": "pad thai recipe for 2"}'))
+    await wait_until(lambda: len(connection.sent) >= 2)
+    events = browser_events(session)
+    assert {"type": "command", "command": RECIPE_ANSWER["commands"][0]} in events  # the card fern chose
+    assert {"type": "fern_reply", "markdown": "Here's a pad thai recipe for 2."} in events  # its full answer
+
+    session.said_on_screen("Pad thai")  # a tapped choice on a card
+    await wait_until(lambda: any(event.get("item", {}).get("role") == "user" for event in connection.sent))
+    item = next(event["item"] for event in connection.sent if event.get("item", {}).get("role") == "user")
+    assert item["content"] == [{"type": "input_text", "text": "Pad thai"}]
+    assert {"type": "response.create"} in connection.sent
+    await session.close()
+    await run_task
+
+
+async def test_say_from_screen_is_owner_only(web_client):
+    client, *_ = web_client
+    session_id = (await client.post("/realtime/call", json=OFFER, headers=AUTHORIZED)).json()["session_id"]
+    words = {"session_id": session_id, "text": "Pad thai"}
+    assert (await client.post("/realtime/say", json=words, headers=AUTHORIZED)).status_code == 202
+    other_device = {"Authorization": "Bearer other-device-token"}
+    assert (await client.post("/realtime/say", json=words, headers=other_device)).status_code == 404

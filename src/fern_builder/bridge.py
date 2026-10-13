@@ -170,6 +170,7 @@ class ClaudeChat:
                 {
                     "question": question["question"],
                     "options": [option["label"] for option in question.get("options", [])],
+                    "descriptions": [option.get("description", "") for option in question.get("options", [])],
                     "multi_select": bool(question.get("multiSelect")),
                 }
                 for question in tool_input.get("questions", [])

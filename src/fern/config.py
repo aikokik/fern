@@ -38,7 +38,9 @@ class Settings:
     approval: str = os.getenv("FERN_APPROVAL", "on-risk")
     # App-level egress allowlist (the Docker proxy enforces the same list at network level).
     allowed_hosts: frozenset[str] = frozenset(
-        os.getenv("FERN_ALLOWED_HOSTS", "api.openai.com,api.anthropic.com,api.github.com,ntfy.sh").split(",")
+        os.getenv("FERN_ALLOWED_HOSTS", "api.openai.com,api.anthropic.com,api.github.com,ntfy.sh,api.pexels.com").split(
+            ","
+        )
     )
     device_tokens: dict[str, str] = field(default_factory=lambda: _parse_pairs(os.getenv("FERN_DEVICE_TOKENS", "")))
     memory: str = os.getenv("FERN_MEMORY", "fern.memory:SQLiteMemory")  # swap in any Memory impl
@@ -53,6 +55,7 @@ class Settings:
     github_token: str = os.getenv("FERN_GITHUB_TOKEN", "")
     ntfy_server: str = os.getenv("FERN_NTFY_SERVER", "https://ntfy.sh")
     ntfy_topic: str = os.getenv("FERN_NTFY_TOPIC", "")
+    pexels_key: str = os.getenv("FERN_PEXELS_KEY", "")  # photos for on-screen cards (free key at pexels.com/api)
     timezone: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
     # OpenAI vector stores the research subagent may search with file_search (your uploaded documents).
     vector_store_ids: tuple[str, ...] = _parse_list(os.getenv("FERN_VECTOR_STORE_IDS", ""))

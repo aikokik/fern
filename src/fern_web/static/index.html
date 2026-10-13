@@ -5,44 +5,54 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="fern">
-  <meta name="theme-color" content="#10201a">
+  <meta name="theme-color" content="#0f1b16">
   <title>fern</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-  <main>
-    <header>
-      <h1>fern</h1>
-      <span id="mode" class="badge" hidden></span>
-      <div class="header-links"><a href="/usage">Usage</a><button id="settings" class="ghost" aria-label="Device token">⚙</button></div>
+<body data-state="idle" data-who="fern">
+  <main class="canvas">
+    <header class="topbar">
+      <h1>fern <span id="mode" class="mode-chip" hidden>Claude</span></h1>
+      <nav class="header-links">
+        <button id="show-transcript" class="icon" aria-label="Transcript" title="Transcript">≡</button>
+        <a href="/usage">Usage</a>
+        <button id="settings" class="icon" aria-label="Device token" title="Device token">⚙</button>
+      </nav>
     </header>
 
-    <form id="token-form" hidden>
+    <form id="token-form" class="sheet" hidden>
       <p id="token-status" class="muted"></p>
       <label for="token">Device token</label>
       <input id="token" type="password" autocomplete="off" placeholder="paste the phone= value from .env">
-      <div class="token-buttons">
+      <div class="row">
         <button type="submit">Save</button>
         <button type="button" id="forget-token" class="ghost" hidden>Forget</button>
       </div>
     </form>
 
-    <section id="stage">
-      <button id="mic" aria-label="Start talking"><span></span></button>
-      <p id="status">Tap to talk</p>
-      <button id="mute" class="ghost" hidden>Mute</button>
+    <!-- Moments: everything fern or Claude shows (answers, photos, recipes, questions, approvals) floats in here. -->
+    <section id="moments" aria-live="polite">
+      <div id="welcome" class="welcome">
+        <p class="welcome-title">Tap the orb and talk.</p>
+        <p class="muted">Try “show me pictures of pad thai”, “how do I make pancakes for 4?” or “open Claude”.</p>
+      </div>
     </section>
 
-    <section id="claude-panel" hidden aria-live="polite">
-      <ol id="claude-steps"></ol>
-      <div id="claude-plan"></div>
-      <div id="claude-permission"></div>
-      <div id="claude-question"></div>
-      <div id="claude-links"></div>
-    </section>
+    <footer class="dock">
+      <p id="caption" class="caption" aria-live="polite"></p>
+      <div class="controls">
+        <button id="mute" class="ghost round" hidden aria-label="Mute">🎙</button>
+        <button id="orb" aria-label="Start talking"><span class="aura"></span><span class="core"></span></button>
+        <button id="end" class="ghost round" hidden aria-label="End">✕</button>
+      </div>
+      <p id="status" class="status">Tap to talk</p>
+    </footer>
 
-    <section id="cards" aria-live="polite"></section>
-    <section id="log" aria-live="polite"></section>
+    <aside id="transcript" class="drawer" hidden>
+      <header class="drawer-head"><strong>Transcript</strong><button id="close-transcript" class="icon" aria-label="Close">✕</button></header>
+      <ol id="transcript-lines"></ol>
+    </aside>
+    <div id="lightbox" class="lightbox" hidden><img id="lightbox-image" alt=""></div>
   </main>
   <audio id="remote" autoplay></audio>
   <script src="/static/app.js"></script>

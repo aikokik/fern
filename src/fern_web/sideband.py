@@ -181,6 +181,12 @@ class VoiceSession:
         self.last_activity_at = time.monotonic()
         self.run_in_background(self.claude.answer_from_screen(text))
 
+    def said_on_screen(self, text: str) -> None:
+        """A tapped choice on a card: goes into the conversation as the user's words. (It never counts as a spoken
+        approval: those come only from the transcript.)"""
+        self.last_activity_at = time.monotonic()
+        self.run_in_background(self.say(text, role="user"))
+
     def decide_claude_from_screen(self, decision: str) -> None:
         """A tapped Approve / Always / Reject on Claude's permission card."""
         self.last_activity_at = time.monotonic()
@@ -228,6 +234,8 @@ class VoiceSession:
             return
         log.info("ask_fern: tools=%s pending=%d", brain_response.get("tools"), len(brain_response.get("pending", [])))
         await self.publish(brain_response)
+        if brain_response.get("reply") and not brain_response.get("pending"):  # the full answer, on screen
+            await self.browser_events.put({"type": "fern_reply", "markdown": brain_response["reply"]})
         await self.send_tool_output(call_id, self._describe(brain_response))
 
     async def _decide_approval(self, call_id: str, approve: bool, always: bool = False) -> None:
@@ -298,8 +306,8 @@ class VoiceSession:
             await asyncio.sleep(0.2)
         return self.connection is not None and not self.closed.is_set()
 
-    async def say(self, text: str) -> None:
-        """Inject a system message and let the model voice it, waiting for a pause first."""
+    async def say(self, text: str, role: str = "system") -> None:
+        """Inject a message (a system notice, or the user's tapped words) and let the model respond after a pause."""
         if not await self._wait_for_pause():
             return
         await self.connection.send(
@@ -307,7 +315,7 @@ class VoiceSession:
                 "type": "conversation.item.create",
                 "item": {
                     "type": "message",
-                    "role": "system",
+                    "role": role,
                     "content": [{"type": "input_text", "text": text}],
                 },
             }

@@ -2,4 +2,5 @@
 ^api\.anthropic\.com$
 ^api\.github\.com$
 ^ntfy\.sh$
+^api\.pexels\.com$
 ^host\.docker\.internal$
