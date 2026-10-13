@@ -1,4 +1,4 @@
-# fern: household AI
+# fern: Interactive coding w/ Claude and Codex
 
 ```
 phone/laptop ─Tailscale HTTPS─▶ ingress ─▶ web (src/fern_web: voice UI, Realtime handshake + server channel, /v1 pass-through)
