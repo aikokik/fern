@@ -1,6 +1,7 @@
 # @claude in an issue or PR comment: a question gets an answer in the thread; a task goes on the to-do list
 # (an issue labeled `todo`); work starts only when the comment explicitly asks for it (then a claude/ branch + PR).
-# Runs on GitHub's runners with the owner's Claude subscription token. Only users with write access can trigger it.
+# Runs on GitHub's runners with the owner's Claude subscription token and this job's own GitHub token (no Claude
+# GitHub App). Only users with write access can trigger it.
 name: claude
 on:
   issue_comment:
@@ -18,7 +19,6 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      id-token: write
       actions: read
     steps:
       - uses: actions/checkout@v6
@@ -29,6 +29,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}  # for `gh issue create` (the to-do list); expires with the job
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # No Claude GitHub App: act with this job's token. Side effect: GitHub doesn't start other workflows (CI)
+          # for pushes made with it, so re-run CI by hand on Claude's PRs.
+          github_token: ${{ github.token }}
           claude_args: |
             --allowedTools "Bash(gh issue create:*),Bash(gh issue list:*),Bash(gh issue view:*)"
             --append-system-prompt "You are answering a GitHub comment from the repository owner. Decide what the comment is:
