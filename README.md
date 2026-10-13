@@ -38,6 +38,8 @@ Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` 
 - **Skill:** `skills/<name>/SKILL.md` with `name`/`description` frontmatter; only the index goes in the prompt
   (`read_skill` stays hidden until a skill exists).
 - **Research documents:** set `FERN_VECTOR_STORE_IDS=vs_...` to let the research subagent use OpenAI file_search.
+- **On-screen cards:** fern shows recipes (servings rescale), checklists, choices and tables by itself, and photos with
+  `FERN_PEXELS_KEY` (free key at pexels.com/api). The page renders only known card types, never model-written HTML.
 - **Token usage:** the `/usage` page or `uv run fern usage --days 7` (cost per part; prices in `src/fern/costs.py`). Knobs:
   `FERN_REASONING_EFFORT`, `FERN_VOICE_MAX_OUTPUT_TOKENS`, `FERN_VOICE_CONTEXT_TOKENS`, `FERN_MODELS`.
 - **Standing instructions:** `data/HOUSEHOLD.md`.

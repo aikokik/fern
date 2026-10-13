@@ -7,3 +7,5 @@
 {"id": "research-web", "input": "Search the web: who won the 2026 Nobel Prize in Physics?", "target": "Names the laureate(s) briefly, citing a source; plain text.", "metadata": {"tools": ["research"], "forbid": ["remember", "set_alarm"], "pending": false}}
 {"id": "github-list", "input": "What pull requests are open on fern?", "target": "Briefly lists the open pull requests.", "metadata": {"tools": ["github_list"], "pending": false}}
 {"id": "github-close", "input": "Close issue 12 on GitHub", "target": "Asks for approval to close issue #12.", "metadata": {"tools": ["github_set_state"], "pending": true}}
+{"id": "show-photos", "input": "Show me some pictures of pad thai", "target": "Shows photos of pad thai and says so in one short sentence.", "metadata": {"tools": ["show_images"], "pending": false}}
+{"id": "recipe-card", "input": "How do I make pancakes for 4 people?", "target": "Shows a pancake recipe card for 4 servings and keeps the spoken reply short.", "metadata": {"tools": ["show_card"], "pending": false}}

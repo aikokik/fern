@@ -482,3 +482,74 @@ async def test_github_errors_are_explained_without_leaking(make_brain, caplog):
     model = script(unconfigured, [[list_issues], [assistant_message("x")]])
     await unconfigured.run("list issues", session="g4")
     assert "GitHub isn't set up" in json.dumps(model.calls[1].input)
+
+
+PANCAKES = {
+    "type": "recipe",
+    "title": "Pancakes",
+    "servings": 4,
+    "ingredients": [{"name": "flour", "amount": 250, "unit": "g"}, {"name": "salt", "amount": None, "unit": ""}],
+    "steps": [f"step {number}" for number in range(40)],
+}
+
+
+async def test_cards_are_queued_for_the_screen_not_spoken(brain):
+    script(
+        brain,
+        [[function_call("show_card", {"card": PANCAKES}, call_id="c1")], [assistant_message("Here's the recipe.")]],
+    )
+    response = await brain.run("pancakes for 4?", session="d1")
+    card = response["commands"][0]
+    assert card["type"] == "show.card"
+    assert card["card"]["ingredients"][1] == {"name": "salt", "amount": None, "unit": ""}
+    assert len(card["card"]["steps"]) == 30  # capped so a runaway card can't flood the screen
+    assert response["reply"] == "Here's the recipe."
+
+
+async def test_photos_come_from_pexels_and_only_its_image_host(make_brain):
+    sent_requests = []
+
+    def pexels(request: httpx.Request) -> httpx.Response:
+        sent_requests.append(request)
+        photos = [
+            {"src": {"medium": "https://images.pexels.com/photos/1/a.jpeg"}, "alt": "Pad thai", "photographer": "Ann",
+             "url": "https://www.pexels.com/photo/1/"},
+            {"src": {"medium": "https://evil.example/tracker.png"}, "alt": "x", "photographer": "?", "url": ""},
+        ]  # fmt: skip
+        return httpx.Response(200, json={"photos": photos})
+
+    brain = await make_brain(pexels, pexels_key="pexels-key")
+    script(
+        brain,
+        [[function_call("show_images", {"query": "pad thai", "count": 3}, call_id="c1")], [assistant_message("Here.")]],
+    )
+    response = await brain.run("show me pad thai", session="d2")
+    assert sent_requests[0].url.host == "api.pexels.com"
+    assert sent_requests[0].headers["authorization"] == "pexels-key"
+    assert response["commands"] == [
+        {
+            "type": "show.images",
+            "query": "pad thai",
+            "images": [
+                {"src": "https://images.pexels.com/photos/1/a.jpeg", "alt": "Pad thai", "credit": "Ann",
+                 "link": "https://www.pexels.com/photo/1/"},
+            ],
+        }
+    ]  # fmt: skip
+
+    unconfigured = await make_brain()
+    model = script(
+        unconfigured,
+        [[function_call("show_images", {"query": "pad thai", "count": 3}, call_id="c1")], [assistant_message("x")]],
+    )
+    await unconfigured.run("show me pad thai", session="d3")
+    assert "photos aren't set up" in json.dumps(model.calls[1].input)
+
+
+async def test_read_tools_never_wait_for_approval_even_with_defaults_left_out(brain):
+    model = script(
+        brain, [[function_call("show_images", {"query": "pad thai"}, call_id="c1")], [assistant_message("x")]]
+    )
+    response = await brain.run("show me pad thai", session="d4")
+    assert not response["pending"]  # READ runs straight away (it used to pause when the SDK filled in `count`)
+    assert "photos aren't set up" in json.dumps(model.calls[1].input)

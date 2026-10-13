@@ -84,9 +84,12 @@ def tool(tier: Tier, group: str | None = None, timeout: float = 20) -> Callable[
                 return output
             return output[:limit] + "…[truncated]"
 
-        async def needs_approval(run: RunContextWrapper[FernContext], _arguments: dict, _call_id: str) -> bool:
-            policy = run.context.settings.approval
-            return tier is Tier.RISKY or (tier is Tier.ACT and policy == "untrusted")
+        async def act_needs_approval(run: RunContextWrapper[FernContext], _arguments: dict, _call_id: str) -> bool:
+            return run.context.settings.approval == "untrusted"
+
+        # Fixed answers where the tier decides alone. With a callable, the SDK also asks for approval whenever it
+        # can't prove validation left the arguments unchanged (typed args, filled-in defaults): spurious for READ.
+        needs_approval = {Tier.READ: False, Tier.RISKY: True}.get(tier, act_needs_approval)
 
         def is_visible(run: RunContextWrapper[FernContext], _agent: Any) -> bool:
             if tier is Tier.RISKY and run.context.settings.approval == "never":
