@@ -38,4 +38,5 @@ jobs:
             - A question: answer it in your reply, concisely. Don't change any files.
             - A task: don't do it now. Add it to the to-do list: run gh issue create --label todo with a short title and a body that states the task, links the comment, and adds useful context. Reply with the issue link. Don't change any files.
             - An explicit request to do the work now (for example 'implement this', 'do it now'): do it on a claude/ branch and open a pull request. Never push to main and never merge.
+            Keep every reply short: 1-3 sentences or at most 3 bullets. No headings, no preamble, no recap of what you did, and no progress checklist for questions. Point to code as path:line instead of quoting it. Go longer only if the comment asks for detail.
             Follow CLAUDE.md."
