@@ -20,6 +20,8 @@ button, .button {
 }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 form { display: grid; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+.token-buttons { display: flex; gap: 8px; }
+#token-status { margin: 0; }
 input { font: inherit; padding: .6rem; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 
 #stage { display: grid; justify-items: center; gap: 14px; padding-block: 8vh 4vh; }

@@ -18,9 +18,13 @@
     </header>
 
     <form id="token-form" hidden>
+      <p id="token-status" class="muted"></p>
       <label for="token">Device token</label>
       <input id="token" type="password" autocomplete="off" placeholder="paste the phone= value from .env">
-      <button type="submit">Save</button>
+      <div class="token-buttons">
+        <button type="submit">Save</button>
+        <button type="button" id="forget-token" class="ghost" hidden>Forget</button>
+      </div>
     </form>
 
     <section id="stage">

@@ -292,16 +292,43 @@ function showAlarmCard(command) {
 
 function showTokenForm() {
   element("#token-form").hidden = false;
+  refreshTokenStatus();
   element("#token").focus();
 }
 
-element("#token-form").onsubmit = (submitEvent) => {
+// The browser keeps the token after the first paste, so say whether one is saved and which device it belongs to.
+async function refreshTokenStatus() {
+  const status = element("#token-status");
+  element("#forget-token").hidden = !deviceToken;
+  if (!deviceToken) {
+    status.textContent = "No token saved in this browser.";
+    return;
+  }
+  status.textContent = "Token saved, checking…";
+  const response = await api("/v1/profile").catch(() => null);
+  if (response?.ok) status.textContent = `Token saved ✓ · device: ${(await response.json()).device}`;
+  else if (response?.status === 401) status.textContent = "The saved token was rejected. Paste a new one.";
+  else status.textContent = "Token saved ✓ (couldn't check: fern is unreachable)";
+}
+
+element("#token-form").onsubmit = async (submitEvent) => {
   submitEvent.preventDefault();
   deviceToken = element("#token").value.trim();
   localStorage.setItem("fern-token", deviceToken);
-  element("#token-form").hidden = true;
+  element("#token").value = "";
+  await refreshTokenStatus();
+  setState("idle", deviceToken ? "Tap to talk" : "Add your device token ⚙");
 };
-element("#settings").onclick = () => { element("#token-form").hidden = !element("#token-form").hidden; };
+element("#forget-token").onclick = () => {
+  localStorage.removeItem("fern-token");
+  deviceToken = "";
+  refreshTokenStatus();
+  setState("idle", "Add your device token ⚙");
+};
+element("#settings").onclick = () => {
+  if (element("#token-form").hidden) showTokenForm();
+  else element("#token-form").hidden = true;
+};
 element("#mic").onclick = () => (peerConnection ? stop() : start());
 element("#mute").onclick = () => {
   const track = microphone?.getTracks()[0];
