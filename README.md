@@ -1,14 +1,27 @@
-# fern: Interactive coding w/ Claude and Codex via voice 
+# fern: interactive coding by voice
+
+Talk to **Claude Code** from your phone the way you'd chat with it in VS Code: say "open Claude", describe what you
+want, watch its steps stream onto the screen, and approve its actions with a spoken "yes" or a tap. fern also runs a
+small, sandboxed household assistant (alarms, memory, research, recipes and photos on screen) behind the same voice.
+
+- **Voice Claude, like the VS Code chat.** Claude Code runs on your Mac through the Claude Agent SDK, with your folder,
+  login, `gh`, permission rules and memories. Anything your rules would ask about comes to you as "Approve?" by
+  voice or on screen. Sessions are shared with the VS Code chat: list them, open one, or start a new one by voice.
+- **`@claude` on GitHub.** Comment `@claude` on an issue or PR: questions get a short answer in the thread, tasks go
+  to a `todo` issue list, and "implement this" opens a PR.
+- **A living canvas.** An audio-reactive orb, live captions, and cards the assistant chooses itself: answers,
+  photos, recipes whose servings rescale, checklists, choices to tap, tables, and Claude's live work.
+- **Sandboxed by default.** The household brain runs in a sealed container with an egress allowlist; risky actions
+  need a human; the browser never holds an API key and never renders model-written HTML.
 
 ```
-phone/laptop ─Tailscale HTTPS─▶ ingress ─▶ web (src/fern_web: voice UI, Realtime handshake + server channel, /v1 pass-through)
-     │ WebRTC audio ──▶ OpenAI Realtime ◀── server channel (tool calls) ──┘          │ device token
-                                                                                     ▼
-                                       brain (src/fern: API only, sealed net, read-only, non-root) ─▶ egress proxy (allowlist)
-                                        ├─ fern (main model): alarms, memory, approvals, scheduler (1 call per action)
-                                        ├─ research (fast model): OpenAI web_search (+ file_search) only, answer marked untrusted
-                                        └─ request_change (approved spec) ─▶ Claude Code Routine ─▶ PR ─▶ you merge ─▶ deployer
+phone/laptop ─▶ web (Docker: voice page, Realtime handshake, server-side channel) ─▶ brain (Docker, sealed network)
+     │ WebRTC audio ⇄ OpenAI Realtime                    │                             └─▶ egress proxy (allowlist)
+     │                                                   └─▶ fern-bridge on the Mac ─▶ Claude Code (Agent SDK)
+     └ cards, captions, approvals                            your folder, login, gh, permission prompts by voice
 ```
+
+Status: a personal project, shared for reference. No license: the code is visible, all rights reserved.
 
 ## Run
 ```bash
@@ -31,7 +44,7 @@ cd deploy && cp ../.env .env && docker compose up -d --build   # sandboxed; entr
 Also `GET /healthz`, `GET /v1/profile`, `GET /v1/notices`, `POST /v1/voice-log` (used by the web app), and
 `GET /v1/usage` (cost report). **Usage page:** open `/usage` in the web app (same device token).
 
-**Docs:** [iPhone + voice web app](docs/iphone.md) · [Claude Code builder](docs/builder.md) · [talking to Claude Code](docs/claude-voice.md) · [always-on hosting](docs/hosting.md)
+**Docs:** [talking to Claude Code by voice](docs/claude-voice.md) · [iPhone + voice web app](docs/iphone.md) · [Claude Code builder (cloud)](docs/builder.md) · [always-on hosting](docs/hosting.md)
 
 ## Extend
 - **Tool:** `@tool(Tier.READ|ACT|RISKY, group=...)` in a module with `TOOLS` (+ `GROUPS`); `FERN_PLUGINS=my.module`.

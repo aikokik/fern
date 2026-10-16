@@ -1,10 +1,10 @@
 [project]
 name = "fern"
 version = "0.1.0"
-description = "Household AI brain"
+description = "Voice-first interactive coding with Claude Code, plus a sandboxed household assistant"
 readme = "README.md"
 authors = [
-    { name = "aikokik", email = "aikokik@users.noreply.github.com" }
+    { name = "aikokik" }
 ]
 requires-python = ">=3.14"
 dependencies = [
