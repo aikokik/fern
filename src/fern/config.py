@@ -56,7 +56,7 @@ class Settings:
     ntfy_server: str = os.getenv("FERN_NTFY_SERVER", "https://ntfy.sh")
     ntfy_topic: str = os.getenv("FERN_NTFY_TOPIC", "")
     pexels_key: str = os.getenv("FERN_PEXELS_KEY", "")  # photos for on-screen cards (free key at pexels.com/api)
-    timezone: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Asia/Lisbon. Containers default to UTC, so set it.
+    timezone: str = os.getenv("FERN_TZ", "")  # IANA name, e.g. Europe/Lisbon. Containers default to UTC, so set it.
     # OpenAI vector stores the research subagent may search with file_search (your uploaded documents).
     vector_store_ids: tuple[str, ...] = _parse_list(os.getenv("FERN_VECTOR_STORE_IDS", ""))
     # Reasoning tokens are billed as output; household requests rarely need deep reasoning.

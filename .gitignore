@@ -7,3 +7,5 @@ logs/
 deploy/.deployed
 deploy/.bad
 deploy/backup.env
+.DS_Store
+docs/code-review-*.md
