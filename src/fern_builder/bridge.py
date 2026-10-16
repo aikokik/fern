@@ -10,6 +10,8 @@ POST /permissions/{id}          {decision: allow | always | deny}
 POST /questions/{id}            {answers: {question: label}}
 POST /interrupt                 stop the current turn
 POST /new                       the next message starts a fresh conversation
+GET  /runs                      what Claude Code reported for recent runs (input, actions, output, status)
+GET  /runs/stream               the same, live, as NDJSON: a snapshot, then every change, with pings
 GET  /sessions                  recent conversations in this project, newest first
 POST /sessions/{id}/open        the next message continues that conversation
 GET  /healthz
@@ -29,19 +31,26 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
+    SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolPermissionContext,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
     list_sessions,
 )
+from claude_agent_sdk.types import HookJSONOutput
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from fern_builder.config import BuilderSettings, builder_settings
+from fern_builder.runs import HISTORY, TEXT_LIMIT, RunLog, clip
 
 log = logging.getLogger("fern_builder")
 VOICE_NOTE = (
@@ -78,6 +87,8 @@ class ClaudeChat:
         self.fresh = False  # set by /new: don't continue the latest conversation
         self.chosen_session: str | None = None  # set by /sessions/{id}/open: continue that one instead
         self.session_id: str | None = None  # the conversation Claude is in
+        self.runs = RunLog(settings.runs_file)
+        self.run: dict | None = None  # the run in progress, as Claude Code reports it
 
     def options(self) -> ClaudeAgentOptions:
         return ClaudeAgentOptions(
@@ -86,6 +97,7 @@ class ClaudeChat:
             resume=self.chosen_session,
             continue_conversation=not (self.fresh or self.chosen_session),  # the latest one itself, not a copy
             can_use_tool=self._ask_user,
+            hooks={"UserPromptSubmit": [HookMatcher(hooks=[self._on_prompt])]},  # reports transcript_path
             system_prompt={"type": "preset", "preset": "claude_code", "append": VOICE_NOTE},
         )
 
@@ -98,6 +110,7 @@ class ClaudeChat:
         if self.events is not None:
             raise ChatBusyError
         self.events = asyncio.Queue()
+        self.run = self.runs.start(text)
         if self.worker is None or self.worker.done():
             self.worker = asyncio.create_task(self._run())
         await self.inbox.put(text)
@@ -135,6 +148,10 @@ class ClaudeChat:
         except Exception as error:
             reference = secrets.token_hex(3)
             log.exception("claude session failed [ref %s]", reference)
+            if self.run is not None:
+                self.runs.finish(
+                    self.run, "error", errors=[f"{type(error).__name__} (fern-bridge log ref {reference})"]
+                )
             await self._emit({"type": "error", "message": type(error).__name__, "reference": reference})
         finally:
             self.client = None
@@ -148,7 +165,48 @@ class ClaudeChat:
         except TimeoutError:
             return None
 
+    async def _on_prompt(self, hook_input: Any, _tool_use_id: str | None, _context: Any) -> HookJSONOutput:
+        """Claude Code's UserPromptSubmit hook: it reports where it keeps this session's transcript."""
+        if self.run is not None:
+            reported = {key: hook_input.get(key) for key in ("transcript_path", "session_id", "cwd", "permission_mode")}
+            self.runs.update(self.run, **reported)
+        return {}
+
+    def _record(self, message: Any) -> None:
+        """Add what this SDK message reports to the current run (for the activity panel)."""
+        run = self.run
+        if run is None:
+            return
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            data = message.data
+            self.runs.update(
+                run, session_id=data.get("session_id"), model=data.get("model"), cwd=data.get("cwd"),
+                permission_mode=data.get("permissionMode"), api_key_source=data.get("apiKeySource"),
+            )  # fmt: skip
+        elif isinstance(message, AssistantMessage):
+            parent = message.parent_tool_use_id  # set when a subagent (Agent tool) produced this message
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text.strip():
+                    self.runs.add_text(run, "text", block.text, parent)
+                elif isinstance(block, ThinkingBlock) and block.thinking.strip():
+                    self.runs.add_text(run, "thinking", block.thinking, parent)
+                elif isinstance(block, ToolUseBlock):
+                    self.runs.add_tool(run, block.id, block.name, block.input, parent)
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, ToolResultBlock):
+                    self.runs.tool_result(run, block.tool_use_id, block.content, block.is_error)
+        elif isinstance(message, ResultMessage):
+            self.runs.finish(
+                run, "error" if message.is_error else "done", output=clip(message.result or ""),
+                result_subtype=message.subtype, session_id=message.session_id, num_turns=message.num_turns,
+                duration_ms=message.duration_ms, duration_api_ms=message.duration_api_ms,
+                cost_usd=message.total_cost_usd, usage=message.usage, errors=message.errors,
+                permission_denials=message.permission_denials,
+            )  # fmt: skip
+
     async def _publish(self, message: Any) -> None:
+        self._record(message)
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock) and block.text.strip():
@@ -179,12 +237,21 @@ class ClaudeChat:
         else:
             detail = self.describe(tool_name, tool_input)
             await self._emit({"type": "permission", "id": request_id, "tool": tool_name, "detail": detail})
+        run, tool_use_id = self.run, getattr(context, "tool_use_id", None)
+        if run is not None:
+            self.runs.tool_status(run, tool_use_id, "waiting_for_you")
+            self.runs.update(run, status="waiting_for_you")
         try:
-            return await asyncio.wait_for(answer, self.settings.approval_timeout_seconds)
+            decision = await asyncio.wait_for(answer, self.settings.approval_timeout_seconds)
         except TimeoutError:
-            return PermissionResultDeny(message="The user didn't answer in time.")
+            decision = PermissionResultDeny(message="The user didn't answer in time.")
         finally:
             self.pending.pop(request_id, None)
+        if run is not None:
+            self.runs.tool_status(run, tool_use_id, "denied" if decision.behavior == "deny" else "running")
+            if run["status"] == "waiting_for_you":
+                self.runs.update(run, status="running")
+        return decision
 
     def _take(self, request_id: str) -> tuple[asyncio.Future, str, dict, ToolPermissionContext]:
         if (entry := self.pending.get(request_id)) is None or entry[0].done():
@@ -218,6 +285,8 @@ class ClaudeChat:
                 answer.set_result(PermissionResultDeny(message=reason, interrupt=True))
 
     async def interrupt(self) -> None:
+        if self.run is not None and self.run["status"] in ("running", "waiting_for_you"):
+            self.runs.update(self.run, status="stopping")
         self._deny_pending("The user stopped this.")
         if self.client is not None and self.events is not None:  # only a running turn can be stopped
             await self.client.interrupt()
@@ -323,6 +392,41 @@ async def interrupt() -> dict:
 async def new_conversation() -> dict:
     await chat.new_conversation()
     return {"ok": True}
+
+
+def runs_report() -> dict:
+    return {
+        "runs_on": "this Mac: fern-bridge drives Claude Code through the Claude Agent SDK",
+        "run_log_file": str(chat.settings.runs_file),
+        "limits": [
+            "Anthropic's API returns no execution log; this shows what the Agent SDK and Claude Code's hooks report.",
+            f"Text longer than {TEXT_LIMIT} characters is cut.",
+            f"History keeps the last {HISTORY} runs.",
+        ],
+        "runs": chat.runs.newest_first(),
+    }
+
+
+@app.get("/runs", dependencies=[Depends(caller)])
+async def runs() -> dict:
+    return runs_report()
+
+
+@app.get("/runs/stream", dependencies=[Depends(caller)])
+async def runs_stream() -> StreamingResponse:
+    async def updates() -> AsyncIterator[dict]:
+        listener = chat.runs.subscribe()
+        try:
+            yield {"type": "snapshot", **runs_report()}
+            while True:
+                try:
+                    yield {"type": "run", "run": await asyncio.wait_for(listener.get(), PING_SECONDS)}
+                except TimeoutError:
+                    yield {"type": "ping"}
+        finally:
+            chat.runs.unsubscribe(listener)
+
+    return StreamingResponse(ndjson(updates()), media_type="application/x-ndjson")
 
 
 @app.get("/sessions", dependencies=[Depends(caller)])

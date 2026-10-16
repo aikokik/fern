@@ -17,7 +17,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from fern_web.brain_client import BrainClient, BrainError
-from fern_web.claude_client import ClaudeClient
+from fern_web.claude_client import ClaudeClient, ClaudeUnavailableError
 from fern_web.config import web_settings
 from fern_web.realtime import household_facts, start_call
 from fern_web.sideband import VoiceSession
@@ -171,6 +171,35 @@ async def stream_events(session_id: str, device_token: str = Depends(bearer_toke
             yield f"data: {json.dumps(event)}\n\n"
             if event["type"] == "end":
                 return
+
+    return StreamingResponse(
+        server_sent_events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
+    )
+
+
+async def claude_viewer(device_token: str = Depends(bearer_token)) -> None:
+    """The run log shows everything Claude did on this Mac: only devices allowed to use Claude may read it."""
+    profile = await fetch_profile(device_token)
+    if web_settings.claude_devices and profile["device"] not in web_settings.claude_devices:
+        raise HTTPException(403, "This device isn't allowed to use Claude Code")
+
+
+@app.get("/claude/runs", dependencies=[Depends(claude_viewer)])
+async def claude_runs() -> dict:
+    try:
+        return await state.claude.runs()
+    except ClaudeUnavailableError as error:
+        raise HTTPException(502, str(error)) from None
+
+
+@app.get("/claude/runs/stream", dependencies=[Depends(claude_viewer)])
+async def claude_runs_stream() -> StreamingResponse:
+    async def server_sent_events():
+        try:
+            async for event in state.claude.follow_runs():
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as error:  # the bridge stopped or isn't reachable: say so, then end the stream
+            yield f"data: {json.dumps({'type': 'unavailable', 'message': type(error).__name__})}\n\n"
 
     return StreamingResponse(
         server_sent_events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}

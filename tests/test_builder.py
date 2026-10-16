@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -12,9 +13,13 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     PermissionUpdate,
     ResultMessage,
+    SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolPermissionContext,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 from claude_agent_sdk.types import PermissionRuleValue, SDKSessionInfo
 
@@ -23,6 +28,7 @@ from fern_builder.bridge import VOICE_NOTE, ChatBusyError, ClaudeChat
 from fern_builder.config import BuilderSettings, read_env_value
 
 PROJECT = Path("/Users/me/fern")
+TRANSCRIPT = "/Users/me/.claude/projects/-Users-me-fern/s.jsonl"
 REMEMBER_PUSH = PermissionUpdate(
     type="addRules",
     rules=[PermissionRuleValue(tool_name="Bash", rule_content="git push:*")],
@@ -56,6 +62,10 @@ class FakeClaude:
 
     async def query(self, text: str) -> None:
         self.prompts.append(text)
+        for matcher in (self.options.hooks or {}).get("UserPromptSubmit", []):  # what Claude Code's hook reports
+            for hook in matcher.hooks:
+                hook_input = {"session_id": "s", "transcript_path": TRANSCRIPT, "cwd": str(PROJECT), "prompt": text}
+                await hook(hook_input | {"permission_mode": "default", "hook_event_name": "UserPromptSubmit"}, None, {})
 
     async def receive_response(self):
         async for message in self.turns.pop(0)(self):
@@ -67,6 +77,7 @@ class FakeClaude:
 
 def make_chat(turns: list, **settings) -> tuple[ClaudeChat, list[FakeClaude]]:
     opened: list[FakeClaude] = []
+    settings.setdefault("runs_file", Path(tempfile.mkdtemp()) / "runs.jsonl")  # never the user's real run log
     chat_settings = BuilderSettings(project_dir=PROJECT, bridge_token="bridge-secret", **settings)
     return ClaudeChat(chat_settings, lambda options: FakeClaude(options, turns, opened)), opened
 
@@ -254,3 +265,61 @@ def test_only_the_bridge_token_is_read_from_env_file(tmp_path):
     env_file.write_text('OPENAI_API_KEY=sk-secret\nFERN_BRIDGE_TOKEN="abc123"\n')
     assert read_env_value(env_file, "FERN_BRIDGE_TOKEN") == "abc123"
     assert read_env_value(tmp_path / "missing.env", "FERN_BRIDGE_TOKEN") == ""
+
+
+async def runs_tests(_client):
+    yield SystemMessage(subtype="init", data={"session_id": "s", "model": "claude-opus-5-5", "cwd": str(PROJECT),
+                                              "permissionMode": "default", "apiKeySource": "none"})  # fmt: skip
+    yield AssistantMessage(
+        content=[
+            ThinkingBlock(thinking="Run the suite first.", signature="x"),
+            TextBlock(text="Running the tests."),
+            ToolUseBlock(id="t1", name="Bash", input={"command": "uv run pytest -q"}),
+        ],
+        model="m",
+    )
+    subagent_step = ToolUseBlock(id="t2", name="Read", input={"file_path": "a.py"})
+    yield AssistantMessage(content=[subagent_step], model="m", parent_tool_use_id="t1")
+    yield UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="53 passed", is_error=False)])
+    yield AssistantMessage(content=[TextBlock(text="All tests pass.")], model="m")
+    yield result("All tests pass.")
+
+
+async def test_each_run_records_what_claude_code_reported(tmp_path):
+    runs_file = tmp_path / "runs.jsonl"
+    chat, _opened = make_chat([runs_tests], runs_file=runs_file)
+    listener = chat.runs.subscribe()
+    await events_of(chat, "run the tests")
+
+    run = chat.runs.newest_first()[0]
+    assert {key: run[key] for key in ("input", "status", "output", "model", "permission_mode", "api_key_source")} == {
+        "input": "run the tests", "status": "done", "output": "All tests pass.", "model": "claude-opus-5-5",
+        "permission_mode": "default", "api_key_source": "none",
+    }  # fmt: skip
+    assert run["transcript_path"] == TRANSCRIPT  # where Claude Code itself says it keeps the session
+    assert (run["num_turns"], run["cost_usd"]) == (1, 0.02)  # Claude Code's own numbers, from the ResultMessage
+    timeline = [(entry["kind"], entry.get("tool") or entry.get("text"), entry["parent"]) for entry in run["timeline"]]
+    assert timeline == [  # in the order Claude produced it, as the IDE shows it
+        ("thinking", "Run the suite first.", None),
+        ("text", "Running the tests.", None),
+        ("tool", "Bash", None),
+        ("tool", "Read", "t1"),  # a subagent's step points at its parent call
+        ("text", "All tests pass.", None),
+    ]
+    bash = run["timeline"][2]
+    assert (bash["input"], bash["status"], bash["output"]) == ({"command": "uv run pytest -q"}, "done", "53 passed")
+    assert run["timeline"][3]["status"] == "stopped"  # never got a result before the run ended
+    assert listener.qsize() >= 4  # the panel saw every change live
+    assert chat.runs.__class__(runs_file).newest_first()[0]["id"] == run["id"]  # history survives a restart
+
+
+async def test_runs_endpoint_reports_source_and_limits(monkeypatch):
+    chat, _opened = make_chat([reads_and_answers])
+    monkeypatch.setattr(bridge_module, "chat", chat)
+    await events_of(chat, "hi")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=bridge_module.app), base_url="http://bridge")
+    assert (await client.get("/runs")).status_code == 401
+    report = (await client.get("/runs", headers={"Authorization": "Bearer bridge-secret"})).json()
+    assert report["run_log_file"] == str(chat.settings.runs_file)
+    assert any("no execution log" in limit for limit in report["limits"])
+    assert [run["input"] for run in report["runs"]] == ["hi"]

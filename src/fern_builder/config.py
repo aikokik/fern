@@ -24,6 +24,10 @@ def read_env_value(env_file: Path, name: str) -> str:
 class BuilderSettings:
     project_dir: Path = Path(os.getenv("FERN_PROJECT_DIR", str(PROJECT_ROOT)))  # Claude works here, like VS Code
     approval_timeout_seconds: float = float(os.getenv("FERN_APPROVAL_TIMEOUT_SECONDS", "600"))  # unanswered = no
+    # Where finished runs are kept for fern's "Claude activity" panel (history survives restarts).
+    runs_file: Path = Path(
+        os.getenv("FERN_CLAUDE_RUNS_FILE", str(Path.home() / "Library/Application Support/fern/claude-runs.jsonl"))
+    )
     bridge_token: str = field(default_factory=lambda: read_env_value(PROJECT_ROOT / ".env", "FERN_BRIDGE_TOKEN"))
 
 

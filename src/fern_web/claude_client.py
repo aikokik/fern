@@ -56,6 +56,24 @@ class ClaudeClient:
     async def new_chat(self) -> None:
         await self._post("/new")
 
+    async def runs(self) -> dict:
+        """What Claude Code reported for recent runs, plus where it comes from (see fern_builder.runs)."""
+        self._require_setup()
+        response = await self.http.get("/runs")
+        if response.status_code >= 400:
+            raise ClaudeUnavailableError(f"bridge returned {response.status_code}")
+        return response.json()
+
+    async def follow_runs(self) -> AsyncIterator[dict]:
+        """The run log live: a snapshot, then every change (the bridge pings every 15 s)."""
+        self._require_setup()
+        async with self.http.stream("GET", "/runs/stream") as response:
+            if response.status_code >= 400:
+                raise ClaudeUnavailableError(f"bridge returned {response.status_code}")
+            async for line in response.aiter_lines():
+                if line.strip():
+                    yield json.loads(line)
+
     async def sessions(self) -> list[dict]:
         self._require_setup()
         response = await self.http.get("/sessions")

@@ -14,7 +14,6 @@ let peerConnection = null;
 let microphone = null;
 let sessionId = null;
 let talkingTo = "fern";  // who the voice relays: fern, or Claude
-let speaker = "fern";  // who the current spoken reply belongs to (for captions)
 let claudeCard = null;  // the card Claude's current turn streams into
 let audio = null;  // { context, analysers, frame } while a call is live
 let orbLevel = 0;
@@ -33,7 +32,6 @@ function setState(state, statusText) {
   document.body.dataset.state = state;
   element("#status").textContent = statusText;
   const live = state === "live";
-  element("#mute").hidden = !live;
   element("#end").hidden = !live;
   element("#orb").setAttribute("aria-label", live ? "Stop talking" : "Start talking");
 }
@@ -45,13 +43,6 @@ function setActivity(activity, statusText) {
 
 function showCaption(text) {
   element("#caption").textContent = text;
-}
-
-function addTranscriptLine(who, text) {
-  if (!text) return;
-  const line = create("li");
-  line.append(create("small", "", who), text);
-  element("#transcript-lines").append(line);
 }
 
 // ── Voice call ──────────────────────────────────────────────────────────────────────────────────────
@@ -145,13 +136,9 @@ function onRealtimeEvent(event) {
       setActivity("listening", "Listening…");
       break;
     case "conversation.item.input_audio_transcription.completed":
-      if (event.transcript?.trim()) {
-        addYouCard(event.transcript);
-        addTranscriptLine(`you → ${talkingTo}`, event.transcript);
-      }
+      if (event.transcript?.trim()) addYouCard(event.transcript);
       break;
     case "response.created":
-      speaker = talkingTo;
       showCaption("");
       setActivity("speaking", "Speaking…");
       break;
@@ -160,7 +147,6 @@ function onRealtimeEvent(event) {
       break;
     case "response.output_audio_transcript.done":
       showCaption(event.transcript);
-      addTranscriptLine(speaker, event.transcript);
       break;
     case "response.done":
       if (document.body.dataset.activity === "speaking") setActivity("listening", "Listening…");
@@ -172,6 +158,11 @@ async function followFernEvents(id) {
   const response = await fetch(`/realtime/events?session_id=${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${deviceToken}` },
   });
+  await readServerEvents(response, onFernEvent);
+}
+
+// Server-sent events over fetch (EventSource can't send the device token header).
+async function readServerEvents(response, handle) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffered = "";
@@ -183,7 +174,7 @@ async function followFernEvents(id) {
     while ((boundary = buffered.indexOf("\n\n")) >= 0) {
       const message = buffered.slice(0, boundary);
       buffered = buffered.slice(boundary + 2);
-      if (message.startsWith("data: ")) onFernEvent(JSON.parse(message.slice(6)));
+      if (message.startsWith("data: ")) handle(JSON.parse(message.slice(6)));
     }
   }
 }
@@ -224,12 +215,11 @@ function showMode(event) {
   const claude = event.mode === "claude";
   talkingTo = claude ? "Claude" : "fern";
   document.body.dataset.who = claude ? "claude" : "fern";
-  element("#mode").hidden = !claude;
+  element("#who").textContent = talkingTo;
 }
 
 // ── Cards ("moments") ───────────────────────────────────────────────────────────────────────────────
 function addCard(kind, label) {
-  element("#welcome")?.remove();
   const card = create("article", `card ${kind}`);
   if (label) card.append(create("p", "card-label", label));
   element("#moments").append(card);
@@ -557,7 +547,240 @@ function appendInline(parent, text) {
   }
 }
 
-// ── Settings: the device token (the browser keeps it after the first paste) ─────────────────────────
+// ── Claude activity: what Claude Code reported for each run, laid out like the VS Code plugin's chat ──────────
+// Every value comes from fern-bridge (Agent SDK messages and Claude Code's hooks); this only lays it out.
+const TOOL_DETAIL = {
+  Bash: "command", Read: "file_path", Edit: "file_path", MultiEdit: "file_path", Write: "file_path",
+  NotebookEdit: "notebook_path", Grep: "pattern", Glob: "pattern", WebSearch: "query", WebFetch: "url",
+  Agent: "description", Task: "description", Skill: "skill",
+};
+const DOT = { done: "success", error: "failure", denied: "failure", waiting_for_you: "warning", running: "progress" };
+const expandedKeys = new Set();  // IN/OUT rows and "Thinking" blocks the user opened, kept across live updates
+let activityStream = null;  // AbortController while the panel is open
+
+async function openActivity() {
+  element("#activity").hidden = false;
+  activityStream?.abort();
+  activityStream = new AbortController();
+  try {
+    const response = await fetch("/claude/runs/stream", {
+      headers: { Authorization: `Bearer ${deviceToken}` }, signal: activityStream.signal,
+    });
+    if (!response.ok) {
+      const reasons = { 401: "A device token is needed.", 403: "This device isn't allowed to use Claude Code." };
+      return showActivityNote(reasons[response.status] || `Couldn't load Claude's runs (${response.status}).`);
+    }
+    await readServerEvents(response, onRunEvent);
+  } catch (error) {
+    if (error.name !== "AbortError") showActivityNote("Lost the connection to the run log.");
+  }
+}
+
+function closeActivity() {
+  activityStream?.abort();
+  element("#activity").hidden = true;
+}
+
+function showActivityNote(text) {
+  element("#activity-source").replaceChildren(create("p", "muted", text));
+}
+
+function onRunEvent(event) {
+  if (event.type === "snapshot") {
+    showRunSource(event);
+    element("#runs").replaceChildren(...[...event.runs].reverse().map(renderRun));  // oldest first, like a chat
+    scrollActivity(true);
+  } else if (event.type === "run") {
+    upsertRun(event.run);
+  } else if (event.type === "unavailable") {
+    showActivityNote(`fern-bridge isn't reachable (${event.message}). Is it running on the Mac?`);
+  }
+}
+
+function showRunSource(report) {
+  const about = create("details", "about-log");
+  about.append(create("summary", "", "About this log"));
+  about.append(keyValue("Runs on", report.runs_on), keyValue("Run log", report.run_log_file));
+  const limits = create("ul");
+  for (const limit of report.limits) limits.append(create("li", "", limit));
+  about.append(limits);
+  element("#activity-source").replaceChildren(about);
+}
+
+function keyValue(label, value) {
+  const line = create("p", "key-value");
+  line.append(create("span", "", `${label}: `), create("code", "", value));
+  return line;
+}
+
+function scrollActivity(force) {
+  const panel = element("#activity");
+  const nearEnd = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120;
+  if (force || nearEnd) requestAnimationFrame(() => { panel.scrollTop = panel.scrollHeight; });
+}
+
+function upsertRun(run) {
+  const panel = element("#activity");
+  const wasNearEnd = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120;
+  const existing = element(`#runs [data-run-id="${CSS.escape(run.id)}"]`);
+  const fresh = renderRun(run);
+  if (existing) existing.replaceWith(fresh);
+  else element("#runs").append(fresh);
+  scrollActivity(wasNearEnd);
+}
+
+function renderRun(run) {
+  const item = create("li", "run");
+  item.dataset.runId = run.id;
+  const when = new Date(run.started * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  item.append(create("p", "run-stamp", when), create("div", "user-message", run.input));
+  // Runs logged before the timeline existed only kept their tool calls.
+  const timeline = run.timeline ?? (run.actions || []).map((action) => ({ kind: "tool", parent: null, ...action }));
+  const steps = create("div", "timeline");
+  renderSteps(steps, timeline, null, run);
+  const shownText = timeline.some((entry) => entry.kind === "text" && entry.text === run.output);
+  if (run.output && !shownText) steps.append(step("", markdownBlock(run.output)));
+  const ending = {
+    running: ["progress", create("span", "working", "Working…")],
+    waiting_for_you: ["warning", create("span", "", "Waiting for your approval in fern")],
+    stopping: ["progress", create("span", "working", "Stopping…")],
+    stopped: ["failure", create("span", "secondary", "Interrupted")],
+  }[run.status];
+  if (ending) steps.append(step(...ending));
+  for (const error of run.errors || []) steps.append(step("failure", create("span", "error-text", error)));
+  if (run.permission_denials?.length) {
+    steps.append(step("failure", create("span", "error-text", `${run.permission_denials.length} permission denials`)));
+  }
+  item.append(steps);
+  const reported = [
+    run.model,
+    run.num_turns != null && `${run.num_turns} turns`,
+    run.duration_ms != null && `${(run.duration_ms / 1000).toFixed(1)} s`,
+    run.cost_usd != null && `$${run.cost_usd.toFixed(4)} API-equivalent`,
+    run.permission_mode && `permissions: ${run.permission_mode}`,
+  ].filter(Boolean);
+  if (reported.length) item.append(create("p", "run-meta", reported.join(" · ")));
+  if (run.transcript_path) {
+    const transcript = create("p", "run-meta");
+    transcript.append("Transcript (kept by Claude Code): ", create("code", "", run.transcript_path));
+    item.append(transcript);
+  }
+  return item;
+}
+
+function step(dot, ...children) {
+  const row = create("div", dot ? `step dot-${dot}` : "step");
+  row.append(...children);
+  return row;
+}
+
+function markdownBlock(markdown) {
+  const block = create("div", "assistant-text");
+  renderMarkdown(block, markdown);
+  return block;
+}
+
+function renderSteps(container, timeline, parent, run) {
+  timeline.forEach((entry, index) => {
+    if ((entry.parent ?? null) !== parent) return;
+    if (entry.kind === "text") container.append(step("", markdownBlock(entry.text)));
+    else if (entry.kind === "thinking") container.append(step("", thinkingBlock(entry.text, `${run.id}:thinking:${index}`)));
+    else container.append(step(DOT[entry.status] || "", renderTool(entry, timeline, run)));
+  });
+}
+
+function thinkingBlock(text, key) {
+  const details = create("details", "thinking");
+  details.open = expandedKeys.has(key);
+  details.ontoggle = () => (details.open ? expandedKeys.add(key) : expandedKeys.delete(key));
+  details.append(create("summary", "", "Thinking"), create("div", "thinking-content", text));
+  return details;
+}
+
+function toolInput(tool) {
+  if (typeof tool.input !== "string") return tool.input || {};
+  try { return JSON.parse(tool.input); } catch { return { input: tool.input }; }
+}
+
+function relativePath(path, run) {
+  return run.cwd && typeof path === "string" ? path.replace(`${run.cwd}/`, "") : path;
+}
+
+function renderTool(tool, timeline, run) {
+  const input = toolInput(tool);
+  const box = create("div", "tool");
+  const head = create("div", "tool-head");
+  head.append(create("span", "tool-name", tool.tool === "TodoWrite" ? "Update Todos" : tool.tool));
+  if (tool.tool === "Bash") {  // like the plugin: the description up top, the command in IN
+    if (input.description) head.append(create("span", "tool-detail plain", input.description));
+  } else if (input[TOOL_DETAIL[tool.tool]]) {
+    head.append(create("span", "tool-detail", relativePath(String(input[TOOL_DETAIL[tool.tool]]), run)));
+  }
+  box.append(head);
+
+  const body = create("div", "tool-body");
+  const key = `${run.id}:${tool.id}`;
+  if (["Edit", "MultiEdit"].includes(tool.tool)) {
+    for (const edit of input.edits || [input]) body.append(ioRow("IN", diffLines(edit.old_string, edit.new_string), `${key}:in`, true));
+  } else if (tool.tool === "TodoWrite") {
+    body.append(todoRow(input.todos || []));
+  } else if (tool.tool === "Write") {
+    body.append(ioRow("IN", input.content ?? "", `${key}:in`));
+  } else if (tool.tool === "Bash") {
+    body.append(ioRow("IN", input.command ?? "", `${key}:in`));
+  } else if (!["Read", "Glob"].includes(tool.tool) || Object.keys(input).length > 1) {
+    body.append(ioRow("IN", JSON.stringify(input, null, 2), `${key}:in`));
+  }
+  const routine = tool.tool === "TodoWrite" && tool.status !== "error";  // its output only says "updated"
+  if (tool.output && !routine) body.append(ioRow(tool.status === "error" ? "ERROR" : "OUT", tool.output, `${key}:out`, false, tool.status === "error"));
+  if (body.children.length) box.append(body);
+
+  if (timeline.some((entry) => entry.parent === tool.id)) {  // a subagent's own steps, under its Agent call
+    const nested = create("div", "timeline nested");
+    renderSteps(nested, timeline, tool.id, run);
+    box.append(nested);
+  }
+  const notes = { denied: "Denied", stopped: "Interrupted" };  // waiting is shown once, at the end of the run
+  if (notes[tool.status]) box.append(create("p", "tool-note", notes[tool.status]));
+  return box;
+}
+
+// One IN/OUT row: clipped to a few lines with a fade, click to expand (like the plugin).
+function ioRow(label, content, key, isNode = false, isError = false) {
+  const row = create("div", "io-row");
+  const body = isNode ? content : create("pre", "", content);
+  body.classList.add("io-content");
+  if (isError) body.classList.add("error-text");
+  if (!expandedKeys.has(key)) body.classList.add("clipped");
+  row.onclick = () => {
+    body.classList.toggle("clipped");
+    body.classList.contains("clipped") ? expandedKeys.delete(key) : expandedKeys.add(key);
+  };
+  row.append(create("span", "io-label", label), body);
+  return row;
+}
+
+function diffLines(before = "", after = "") {
+  const diff = create("div", "diff");
+  for (const line of String(before).split("\n")) if (before) diff.append(create("div", "diff-del", `- ${line}`));
+  for (const line of String(after).split("\n")) if (after) diff.append(create("div", "diff-add", `+ ${line}`));
+  return diff;
+}
+
+function todoRow(todos) {
+  const list = create("ul", "todo-list");
+  for (const todo of todos) {
+    const item = create("li", `todo ${todo.status}`);
+    item.append(create("span", "todo-mark", { completed: "☑", in_progress: "◐" }[todo.status] || "☐"));
+    item.append(create("span", "", todo.status === "in_progress" && todo.activeForm ? todo.activeForm : todo.content));
+    list.append(item);
+  }
+  const row = create("div", "io-row todo-row");
+  row.append(list);
+  return row;
+}
+
+// ── Device token: asked for only when this browser has none or fern rejected it (kept after the first paste) ──
 function showTokenForm() {
   element("#token-form").hidden = false;
   refreshTokenStatus();
@@ -569,13 +792,14 @@ async function refreshTokenStatus() {
   element("#forget-token").hidden = !deviceToken;
   if (!deviceToken) {
     status.textContent = "No token saved in this browser.";
-    return;
+    return false;
   }
   status.textContent = "Token saved, checking…";
   const response = await api("/v1/profile").catch(() => null);
   if (response?.ok) status.textContent = `Token saved ✓ · device: ${(await response.json()).device}`;
   else if (response?.status === 401) status.textContent = "The saved token was rejected. Paste a new one.";
   else status.textContent = "Token saved ✓ (couldn't check: fern is unreachable)";
+  return response?.status !== 401;
 }
 
 element("#token-form").onsubmit = async (submitEvent) => {
@@ -583,30 +807,16 @@ element("#token-form").onsubmit = async (submitEvent) => {
   deviceToken = element("#token").value.trim();
   localStorage.setItem("fern-token", deviceToken);
   element("#token").value = "";
-  await refreshTokenStatus();
-  setState("idle", deviceToken ? "Tap to talk" : "Add your device token ⚙");
+  if (await refreshTokenStatus()) element("#token-form").hidden = true;
 };
 element("#forget-token").onclick = () => {
   localStorage.removeItem("fern-token");
   deviceToken = "";
   refreshTokenStatus();
-  setState("idle", "Add your device token ⚙");
 };
-element("#settings").onclick = () => {
-  if (element("#token-form").hidden) showTokenForm();
-  else element("#token-form").hidden = true;
-};
-element("#show-transcript").onclick = () => { element("#transcript").hidden = !element("#transcript").hidden; };
-element("#close-transcript").onclick = () => { element("#transcript").hidden = true; };
+element("#who").onclick = () => (element("#activity").hidden ? openActivity() : closeActivity());
+element("#close-activity").onclick = () => closeActivity();
 element("#lightbox").onclick = () => { element("#lightbox").hidden = true; };
 element("#orb").onclick = () => (peerConnection ? stop() : start());
 element("#end").onclick = () => stop();
-element("#mute").onclick = () => {
-  const track = microphone?.getTracks()[0];
-  if (!track) return;
-  track.enabled = !track.enabled;
-  element("#mute").textContent = track.enabled ? "🎙" : "🔇";
-  element("#mute").setAttribute("aria-label", track.enabled ? "Mute" : "Unmute");
-  element("#status").textContent = track.enabled ? "Listening…" : "Muted";
-};
-setState("idle", deviceToken ? "Tap to talk" : "Add your device token ⚙");
+setState("idle", "Tap to talk");

@@ -5,21 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="fern">
-  <meta name="theme-color" content="#0f1b16">
+  <meta name="theme-color" content="#ffffff">
   <title>fern</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body data-state="idle" data-who="fern">
   <main class="canvas">
-    <header class="topbar">
-      <h1>fern <span id="mode" class="mode-chip" hidden>Claude</span></h1>
-      <nav class="header-links">
-        <button id="show-transcript" class="icon" aria-label="Transcript" title="Transcript">≡</button>
-        <a href="/usage">Usage</a>
-        <button id="settings" class="icon" aria-label="Device token" title="Device token">⚙</button>
-      </nav>
-    </header>
+    <header class="topbar"><button id="who" class="who" aria-label="Claude activity">fern</button></header>
 
+    <!-- Shown only when this browser has no device token yet, or fern rejected the saved one. -->
     <form id="token-form" class="sheet" hidden>
       <p id="token-status" class="muted"></p>
       <label for="token">Device token</label>
@@ -30,27 +24,23 @@
       </div>
     </form>
 
-    <!-- Moments: everything fern or Claude shows (answers, photos, recipes, questions, approvals) floats in here. -->
-    <section id="moments" aria-live="polite">
-      <div id="welcome" class="welcome">
-        <p class="welcome-title">Tap the orb and talk.</p>
-        <p class="muted">Try “show me pictures of pad thai”, “how do I make pancakes for 4?” or “open Claude”.</p>
-      </div>
-    </section>
+    <!-- Moments: answers, photos, recipes, questions and approvals float in here. -->
+    <section id="moments" aria-live="polite"></section>
 
     <footer class="dock">
       <p id="caption" class="caption" aria-live="polite"></p>
       <div class="controls">
-        <button id="mute" class="ghost round" hidden aria-label="Mute">🎙</button>
+        <span class="spacer" aria-hidden="true"></span>
         <button id="orb" aria-label="Start talking"><span class="aura"></span><span class="core"></span></button>
         <button id="end" class="ghost round" hidden aria-label="End">✕</button>
       </div>
       <p id="status" class="status">Tap to talk</p>
     </footer>
-
-    <aside id="transcript" class="drawer" hidden>
-      <header class="drawer-head"><strong>Transcript</strong><button id="close-transcript" class="icon" aria-label="Close">✕</button></header>
-      <ol id="transcript-lines"></ol>
+    <!-- Claude activity: what Claude Code reported for each run, live (tap the fern / Claude label). -->
+    <aside id="activity" class="activity" hidden aria-label="Claude activity">
+      <header class="activity-head"><strong>Claude activity</strong><button id="close-activity" class="ghost round" aria-label="Close">✕</button></header>
+      <div id="activity-source" class="activity-source"></div>
+      <ol id="runs"></ol>
     </aside>
     <div id="lightbox" class="lightbox" hidden><img id="lightbox-image" alt=""></div>
   </main>

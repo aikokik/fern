@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -144,6 +145,14 @@ SESSIONS = [
     {"id": "s-latest", "title": "Household AI learning plan", "updated": 1_791_800_000, "current": True},
     {"id": "s-older", "title": "Weather tool", "updated": 1_791_700_000, "current": False},
 ]
+RUNS_REPORT = {
+    "runs_on": "this Mac: fern-bridge drives Claude Code through the Claude Agent SDK",
+    "run_log_file": "/Users/me/Library/Application Support/fern/claude-runs.jsonl",
+    "limits": [
+        "Anthropic's API returns no execution log; this shows what the Agent SDK and Claude Code's hooks report."
+    ],
+    "runs": [{"id": "r1", "input": "run the tests", "status": "done", "actions": [], "output": "All pass."}],
+}
 PERMISSION_ID = "a1" * 16
 PERMISSION = {"type": "permission", "id": PERMISSION_ID, "tool": "Bash", "detail": "Bash: git push"}
 QUESTION = {
@@ -174,6 +183,11 @@ class FakeBridge:
             return httpx.Response(200, content=self.stream(), headers={"content-type": "application/x-ndjson"})
         if request.url.path == "/sessions":
             return httpx.Response(200, json=SESSIONS)
+        if request.url.path == "/runs":
+            return httpx.Response(200, json=RUNS_REPORT)
+        if request.url.path == "/runs/stream":
+            lines = [{"type": "snapshot", **RUNS_REPORT}, {"type": "run", "run": RUNS_REPORT["runs"][0]}]
+            return httpx.Response(200, content="".join(json.dumps(line) + "\n" for line in lines).encode())
         self.answered.set()
         return httpx.Response(200, json={"ok": True})
 
@@ -683,3 +697,20 @@ async def test_say_from_screen_is_owner_only(web_client):
     assert (await client.post("/realtime/say", json=words, headers=AUTHORIZED)).status_code == 202
     other_device = {"Authorization": "Bearer other-device-token"}
     assert (await client.post("/realtime/say", json=words, headers=other_device)).status_code == 404
+
+
+async def test_claude_run_log_reaches_allowed_devices_only(web_client, monkeypatch):
+    client, *_ = web_client
+    monkeypatch.setattr(web.state, "claude", ClaudeClient("http://bridge", BRIDGE_TOKEN, FakeBridge().transport))
+    assert (await client.get("/claude/runs")).status_code == 401
+    report = await client.get("/claude/runs", headers=AUTHORIZED)
+    assert report.json() == RUNS_REPORT  # passed through as the bridge reported it
+
+    stream = await client.get("/claude/runs/stream", headers=AUTHORIZED)
+    events = [
+        json.loads(line.removeprefix("data: ")) for line in stream.text.split("\n\n") if line.startswith("data: ")
+    ]
+    assert [event["type"] for event in events] == ["snapshot", "run"]
+
+    monkeypatch.setattr(web, "web_settings", replace(web.web_settings, claude_devices=("tablet",)))
+    assert (await client.get("/claude/runs", headers=AUTHORIZED)).status_code == 403  # this device is "phone"
